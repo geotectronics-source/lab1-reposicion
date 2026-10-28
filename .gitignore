@@ -1,0 +1,44 @@
+# --- Entorno Python ---
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# --- Datos y modelos: NUNCA en Git, se versionan con DVC ---
+# El requerimiento 2 del laboratorio lo exige de forma explícita.
+data/
+landing/
+models/
+# Excepción: los punteros .dvc y los .gitignore generados por DVC SÍ van a Git.
+!*.dvc
+!data/.gitignore
+!landing/.gitignore
+
+# --- Cache local de DVC (el remoto se configura aparte) ---
+/.dvc/cache
+/.dvc/tmp
+/.dvc/config.local
+
+# --- Airflow ---
+docker/logs/
+docker/plugins/
+airflow.db
+airflow.cfg
+webserver_config.py
+standalone_admin_password.txt
+
+# --- Secretos y entorno local ---
+.env
+*.pem
+*.key
+
+# --- Sistema operativo / editores ---
+.DS_Store
+Thumbs.db
+desktop.ini
+.idea/
+.vscode/
