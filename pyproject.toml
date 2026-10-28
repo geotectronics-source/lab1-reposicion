@@ -36,6 +36,9 @@ packages = ["src/reposicion"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# La raíz entra al path para poder probar el simulador de `tools/`, que no es
+# parte del paquete instalable pero sí tiene lógica de fechas que vale probar.
+pythonpath = ["."]
 addopts = "-q --strict-markers"
 markers = [
     "slow: pruebas que entrenan modelos o leen datos grandes",
