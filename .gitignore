@@ -10,13 +10,18 @@ htmlcov/
 
 # --- Datos y modelos: NUNCA en Git, se versionan con DVC ---
 # El requerimiento 2 del laboratorio lo exige de forma explícita.
-data/
-landing/
-models/
+#
+# Las rutas van ancladas con barra inicial para que sólo afecten a la raíz del
+# repositorio. Sin ella, un patrón como `models/` coincide a CUALQUIER nivel y
+# excluye también `src/reposicion/models/`, que es código fuente: el paquete
+# desaparece del repositorio sin aviso y sólo falla al clonar en limpio.
+/data/
+/landing/
+/models/
 # Excepción: los punteros .dvc y los .gitignore generados por DVC SÍ van a Git.
 !*.dvc
-!data/.gitignore
-!landing/.gitignore
+!/data/.gitignore
+!/landing/.gitignore
 
 # --- Cache local de DVC (el remoto se configura aparte) ---
 /.dvc/cache
