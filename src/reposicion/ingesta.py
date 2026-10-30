@@ -30,7 +30,6 @@ import pandas as pd
 from reposicion.config import rutas
 from reposicion.contracts import ESQUEMAS, ErrorDeContrato, avisos_de_negocio, validar
 from reposicion.io import (
-    a_fecha,
     copiar_a_cuarentena,
     escribir_particion,
     leer_particiones,
@@ -129,21 +128,35 @@ def ingerir(
     motivos: list[str] = []
     apartados: list[Path] = []
 
+    def apartar(entrega, motivo: str) -> None:
+        motivos.append(f"{entrega.nombre}: {motivo}")
+        apartados.append(
+            copiar_a_cuarentena(
+                entrega.ruta, ruta_particion(destino_cuarentena, fuente, dia), motivo=motivo
+            )
+        )
+
     for entrega in entregas:
+        # Las dos formas de fallar se capturan por separado y de forma
+        # acotada. Envolver lectura y validación en un mismo `except
+        # ValueError` haría que un defecto NUESTRO se registrara como "el
+        # origen mandó basura", y el log mandaría a depurar al lugar
+        # equivocado. Cualquier excepción que no sea una de estas dos se
+        # propaga: un error del producto debe romper ruidosamente.
         try:
             df = pd.read_csv(entrega.ruta)
-            if "date" in df.columns:
-                df["date"] = a_fecha(df["date"])
+        except (ValueError, OSError, UnicodeDecodeError, pd.errors.ParserError) as exc:
+            apartar(entrega, f"no se pudo leer como CSV: {exc}")
+            continue
+
+        try:
+            # La conversión de `date` la hace el contrato con `coerce`: así una
+            # fecha ilegible se reporta con el detalle de Pandera (columna y
+            # fila) en vez de con un ValueError suelto de pandas.
             partes.append(validar(df, fuente, origen=str(entrega.ruta)))
-        except (ErrorDeContrato, ValueError, pd.errors.ParserError) as exc:
-            motivos.append(f"{entrega.nombre}: {exc}")
-            apartados.append(
-                copiar_a_cuarentena(
-                    entrega.ruta,
-                    ruta_particion(destino_cuarentena, fuente, dia),
-                    motivo=str(exc),
-                )
-            )
+        except ErrorDeContrato as exc:
+            apartar(entrega, str(exc))
+            continue
 
     # Todo-o-nada: con un solo archivo inválido no se materializa la partición.
     if motivos:

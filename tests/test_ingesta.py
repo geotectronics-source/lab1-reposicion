@@ -212,6 +212,42 @@ def test_la_cuarentena_no_toca_la_bandeja(bandeja: Path, almacen: dict[str, Path
     assert original.exists()
 
 
+def test_un_archivo_ilegible_va_a_cuarentena(bandeja: Path, almacen: dict[str, Path]):
+    """Lo que ni siquiera es un CSV se aparta como cualquier otro defecto."""
+    destino = bandeja / "arrival_date=2017-07-06" / "sales" / "sales_roto.csv"
+    destino.write_bytes(b"\xff\xfe esto no es un csv \x00\x01")
+
+    with pytest.raises(IngestaRechazada) as exc:
+        ingerir("sales", "2017-07-06", landing=bandeja, **almacen)
+
+    assert any("no se pudo leer" in m for m in exc.value.motivos)
+    assert not (almacen["raw"] / "sales").exists()
+
+
+def test_un_defecto_del_producto_no_se_disfraza_de_dato_malo(
+    bandeja: Path, almacen: dict[str, Path], monkeypatch: pytest.MonkeyPatch
+):
+    """Regresión: el `except` envolvía lectura y validación juntas.
+
+    Un `ValueError` lanzado por nuestro propio código quedaba registrado como
+    "el origen mandó un archivo inválido", y el archivo bueno acababa en
+    cuarentena. El log mandaba a depurar al sistema origen en vez de al
+    producto. Un error nuestro debe romper ruidosamente.
+    """
+
+    def validar_con_defecto(*_args, **_kwargs):
+        raise ValueError("defecto interno simulado")
+
+    monkeypatch.setattr("reposicion.ingesta.validar", validar_con_defecto)
+
+    with pytest.raises(ValueError, match="defecto interno simulado"):
+        ingerir("sales", "2017-07-06", landing=bandeja, **almacen)
+
+    assert not (almacen["cuarentena"] / "sales").exists(), (
+        "un defecto del producto no debe mandar a cuarentena un archivo sano"
+    )
+
+
 def test_tras_corregir_el_archivo_la_ingesta_pasa(bandeja: Path, almacen: dict[str, Path]):
     """El reproceso de datos corregidos no requiere limpiar nada a mano."""
     malo = _archivo_invalido(bandeja)
