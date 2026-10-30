@@ -111,15 +111,49 @@ apareció con 42.000 series, es menos probable que aparezca con 1.782.
 
 ### Decisión
 
-**No se adopta deep learning.** El beneficio medible está acotado por debajo del 4 % —y una
-parte de ese margen se obtiene simplemente aumentando el número de árboles— mientras que el
-costo incluye multiplicar por cinco el tamaño de la imagen, pasar de segundos a horas de
+**No se adopta deep learning.** El beneficio medible está acotado por debajo del 4 %, y al
+comprobarlo con la métrica real ni siquiera ese margen se sostiene (ver evidencia 4), mientras
+que el costo incluye multiplicar por cinco el tamaño de la imagen, pasar de segundos a horas de
 entrenamiento y comprometer la reproducibilidad, que es un requisito explícito del producto.
+
+### Evidencia 4 — ni siquiera más capacidad en el modelo actual se sostiene
+
+El experimento de capacidad sugería subir a 900 árboles para capturar un 3,5 %. Antes de
+adoptarlo se sometió esa configuración al **mismo criterio de promoción que cualquier retador**:
+cuatro cuantiles, tres pliegues y costo de negocio con el cuantil crítico de cada familia.
+
+| Modelo | Costo negocio | Pinball | RMSLE | Cobertura 0,9 | Cobertura 0,95 |
+|---|---|---|---|---|---|
+| **lgbm actual** (300 árb) | 105,95 | 20,21 | 0,401 | **0,903** | **0,951** |
+| lgbm 900 árboles | 105,82 | 20,11 | 0,398 | 0,885 | 0,936 |
+
+```
+MANTENER - la mejora mínima observada (-2,1 %) no alcanza el umbral de 3 %
+           (p1: +0,5 %, p2: -2,1 %, p3: +1,6 %)
+```
+
+El resultado deja dos lecciones.
+
+**El experimento barato sobreestimó el beneficio.** Medido en un solo pliegue y con una métrica
+aproximada, el margen parecía del 3,5 %; evaluado con la métrica real sobre tres pliegues, se
+queda en 0,1 % de media y **empeora** en uno de ellos. Si el criterio de promoción se hubiera
+aplicado sólo al modelo rival y no a la propia propuesta, se habría adoptado un cambio que no
+mejora nada.
+
+**Más capacidad ajusta mejor el centro y calibra peor las colas.** El modelo grande gana en
+RMSLE (0,398 frente a 0,401) y pierde en cobertura de los cuantiles altos (0,885 frente a 0,903).
+Para un producto cuya política opera en cuantiles altos, la calibración de la cola importa más
+que el ajuste central: es un recordatorio de por qué la decisión la toma el costo de negocio y
+no el error estadístico.
+
+Y refuerza el descarte del aprendizaje profundo: si aumentar la capacidad dentro de la misma
+familia de modelos ya no rinde de forma consistente, una arquitectura con mucha más capacidad
+tiene aún menos probabilidades de hacerlo.
 
 ### Qué se hace en su lugar
 
-1. **Subir el modelo a ~900 árboles y 127 hojas**: captura la mejora del 3,5 % medida, con un
-   costo de 54 s frente a 16 s. Es casi todo el margen disponible, a una fracción del precio.
+1. **Mantener la configuración actual** (300 árboles, 63 hojas). Es la que mejor calibra los
+   cuantiles altos, que es lo que usa la política de pedido, y la más barata de entrenar.
 2. **Atacar la dependencia intra-horizonte con variables, no con arquitectura**: el lag 1
    residual sugiere que el modelo ignora la relación entre días del mismo horizonte. Es
    abordable con variables de interacción o un ajuste por horizonte, sin cambiar de familia de
