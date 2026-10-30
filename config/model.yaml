@@ -1,0 +1,64 @@
+# =============================================================================
+# Configuración del pronóstico
+# =============================================================================
+# Decisiones de producto y de modelado que deben poder cambiarse sin tocar
+# código. Los costos de negocio viven aparte, en `costs.yaml`, porque los
+# ajusta operaciones y no quien mantiene el modelo.
+# =============================================================================
+
+pronostico:
+  # Días que cubre cada emisión. Se pide una vez por semana, así que el
+  # horizonte cubre la semana completa que empieza en la fecha de emisión.
+  dias: 7
+
+  # Día de la semana en que se emite (0 = lunes). El pedido debe estar en el
+  # centro de distribución antes del fin de semana, que es cuando se concentra
+  # la venta.
+  dia_emision: 0
+
+  # Cuantiles a estimar. El 0.5 es el pronóstico central; los altos alimentan
+  # la política de pedido, que elige uno según los costos (ver costs.yaml).
+  # No se estiman cuantiles bajos porque la decisión de reposición nunca pide
+  # menos que la mediana: el riesgo relevante es quedarse corto.
+  cuantiles: [0.5, 0.8, 0.9, 0.95]
+
+features:
+  # Ventanas de agregación, en días, ancladas SIEMPRE al origen (el último día
+  # con datos disponibles), nunca al día que se predice.
+  #
+  # 7 y 14 capturan el nivel reciente; 28 da un nivel estable poco sensible a
+  # una semana atípica; 56 sirve de referencia de largo plazo sin llegar a
+  # recoger estacionalidad anual, que el calendario ya explica.
+  ventanas: [7, 14, 28, 56]
+
+  # Semanas hacia atrás para el promedio del mismo día de la semana. En retail
+  # el día de la semana domina la variación: un sábado se parece mucho más al
+  # sábado anterior que al viernes inmediato.
+  semanas_mismo_dia: 4
+
+  # Días del mes en que cobra la mayoría de los trabajadores en Ecuador. El
+  # dataset de Favorita muestra picos claros de venta alrededor de estas
+  # fechas; `ultimo` representa el último día del mes, que varía.
+  dias_de_pago: [15, ultimo]
+
+entrenamiento:
+  # Cada cuántos días se toma un origen para generar ejemplos. Con 7 se usan
+  # orígenes semanales, los mismos en los que realmente se emite, de modo que
+  # el modelo entrena en las condiciones en que va a operar.
+  cadencia_origenes_dias: 7
+
+  # Cuánta historia se usa para entrenar. Dos años capturan dos ciclos anuales
+  # completos sin arrastrar un comportamiento del negocio que ya cambió.
+  ventana_dias: 730
+
+  # Series sin al menos esta historia caen al baseline: no hay con qué estimar
+  # su nivel ni su estacionalidad semanal.
+  minimo_dias_historia: 56
+
+validacion:
+  # Validación de origen móvil: la única honesta en series temporales. Cada
+  # pliegue entrena con el pasado y evalúa con el futuro inmediato, igual que
+  # ocurre en operación.
+  pliegues: 3
+  # Días que evalúa cada pliegue. 28 cubre cuatro emisiones semanales.
+  dias_por_pliegue: 28
