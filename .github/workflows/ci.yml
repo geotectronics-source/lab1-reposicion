@@ -1,0 +1,47 @@
+name: CI
+
+# Se ejecuta en cada Pull Request (requerimiento del laboratorio) y en los
+# merges a main, para que el historial de la rama principal quede verificado.
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# Un PR que recibe varios pushes seguidos cancela las corridas anteriores:
+# sólo interesa el resultado del último commit.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pruebas:
+    # Matriz deliberada: el desarrollo ocurre en Windows pero el producto se
+    # ejecuta en Linux dentro de los contenedores de Airflow. Probar sólo uno
+    # deja pasar errores de codificación (cp1252) o de separadores de ruta.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Instalar uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      # La versión sale de `requires-python` en pyproject.toml, no se repite
+      # aquí: una sola fuente de verdad evita que el CI y el entorno local
+      # se desincronicen sin que nadie lo note.
+      - name: Instalar Python y dependencias
+        run: uv sync --locked
+
+      - name: Lint
+        run: uv run ruff check .
+
+      - name: Pruebas
+        run: uv run pytest -v
