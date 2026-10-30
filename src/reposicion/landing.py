@@ -34,6 +34,7 @@ import pandas as pd
 
 from reposicion.config import rutas
 from reposicion.contracts import CLAVES, validar
+from reposicion.io import COLUMNA_LLEGADA, a_fecha, marcar_llegada, normalizar_fecha
 
 # El histórico es la carga inicial: por definición precede a cualquier entrega
 # de la bandeja. Se le asigna una fecha de llegada anterior a cualquier dato
@@ -42,7 +43,6 @@ ARRIVAL_HISTORICO = pd.Timestamp("1900-01-01")
 
 _PATRON_ARRIVAL = re.compile(r"^arrival_date=(\d{4}-\d{2}-\d{2})$")
 
-COLUMNA_LLEGADA = "arrival_date"
 
 
 @dataclass(frozen=True)
@@ -56,19 +56,6 @@ class Entrega:
     @property
     def nombre(self) -> str:
         return self.ruta.name
-
-
-def _normalizar(fecha: str | pd.Timestamp) -> pd.Timestamp:
-    """Acepta texto o Timestamp y devuelve una fecha sin hora.
-
-    Airflow entrega `logical_date` como datetime con zona horaria; el negocio
-    opera en una sola zona y los datos son diarios, así que todo se reduce a
-    la fecha del calendario.
-    """
-    ts = pd.Timestamp(fecha)
-    if ts.tzinfo is not None:
-        ts = ts.tz_localize(None)
-    return ts.normalize()
 
 
 def _leer_csv(ruta: Path) -> pd.DataFrame:
@@ -86,7 +73,7 @@ def _leer_csv(ruta: Path) -> pd.DataFrame:
         # pandas 3 parsea en microsegundos, pero el contrato (y Parquet aguas
         # abajo) esperan nanosegundos. Fijarlo aquí evita que una lectura
         # validada y una sin validar devuelvan dtypes distintos.
-        df["date"] = pd.to_datetime(df["date"]).astype("datetime64[ns]")
+        df["date"] = a_fecha(df["date"])
     return df
 
 
@@ -101,7 +88,7 @@ def descubrir_entregas(
     en curso del sistema origen nunca se lee a medias.
     """
     base = landing or rutas().landing
-    limite = _normalizar(asof)
+    limite = normalizar_fecha(asof)
     encontradas: list[Entrega] = []
 
     if not base.exists():
@@ -125,6 +112,29 @@ def descubrir_entregas(
     return sorted(encontradas, key=lambda e: (e.arrival_date, e.nombre))
 
 
+def entregas_del_dia(
+    fuente: str, arrival_date: str | pd.Timestamp, *, landing: Path | None = None
+) -> list[Entrega]:
+    """Entregas llegadas EXACTAMENTE en `arrival_date`.
+
+    La ingesta trabaja por partición: el run del día D procesa sólo lo que
+    llegó en D, no todo lo anterior. Así cada ejecución toca una única
+    partición, la idempotencia es trivial y el backfill de un rango es
+    simplemente un run por día.
+    """
+    base = landing or rutas().landing
+    dia = normalizar_fecha(arrival_date)
+    carpeta = base / f"arrival_date={dia:%Y-%m-%d}" / fuente
+
+    if not carpeta.is_dir():
+        return []
+
+    return [
+        Entrega(arrival_date=dia, fuente=fuente, ruta=archivo)
+        for archivo in sorted(carpeta.glob("*.csv"))
+    ]
+
+
 def leer_historico(
     fuente: str, *, landing: Path | None = None, validar_contrato: bool = True
 ) -> pd.DataFrame:
@@ -137,8 +147,7 @@ def leer_historico(
     df = _leer_csv(ruta)
     if validar_contrato:
         df = validar(df, fuente, origen=str(ruta))
-    df[COLUMNA_LLEGADA] = ARRIVAL_HISTORICO
-    return df
+    return marcar_llegada(df, ARRIVAL_HISTORICO)
 
 
 def leer_asof(
@@ -171,8 +180,7 @@ def leer_asof(
         df = _leer_csv(entrega.ruta)
         if validar_contrato:
             df = validar(df, fuente, origen=str(entrega.ruta))
-        df[COLUMNA_LLEGADA] = entrega.arrival_date
-        partes.append(df)
+        partes.append(marcar_llegada(df, entrega.arrival_date))
 
     if not partes:
         return pd.DataFrame()
@@ -229,7 +237,7 @@ def historial_de(df: pd.DataFrame, fuente: str, **filtros) -> pd.DataFrame:
 
     mascara = pd.Series(True, index=df.index)
     for columna, valor in filtros.items():
-        objetivo = _normalizar(valor) if columna == "date" else valor
+        objetivo = normalizar_fecha(valor) if columna == "date" else valor
         mascara &= df[columna] == objetivo
 
     return df.loc[mascara].sort_values(COLUMNA_LLEGADA, kind="stable").reset_index(drop=True)
@@ -242,7 +250,7 @@ def fuentes_en_bandeja(asof: str | pd.Timestamp, *, landing: Path | None = None)
     ausencia de una fuente como un fallo (INVARIANTE 5).
     """
     base = landing or rutas().landing
-    limite = _normalizar(asof)
+    limite = normalizar_fecha(asof)
     fuentes: set[str] = set()
 
     if not base.exists():
