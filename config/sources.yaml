@@ -1,0 +1,111 @@
+# =============================================================================
+# Configuración del sistema de origen simulado (la "bandeja")
+# =============================================================================
+# Este archivo describe CÓMO entrega los datos el sistema de la empresa:
+# con qué frecuencia llega cada fuente, cuánto se tarda en saberla y qué
+# incidentes de operación reproducimos.
+#
+# Lo consume únicamente `tools/build_landing.py`, que es el SIMULADOR del
+# sistema origen y no forma parte del producto (ver INVARIANTE 2 en CLAUDE.md).
+# =============================================================================
+
+origen:
+  # Dónde coloca el evaluador los CSV originales de Kaggle (ver README.md).
+  kaggle_dir: data/kaggle
+  # Dónde se materializa la bandeja. El producto SOLO LEE de aquí.
+  landing_dir: landing
+
+  # Cuántos días de operación simulada queremos por delante del corte.
+  # Con los datos públicos de Kaggle (ventas hasta 2017-08-15) esto sitúa el
+  # corte en 2017-06-30 y produce ~6 ciclos semanales de pronóstico.
+  dias_operacion: 46
+
+  # Corte explícito del histórico (YYYY-MM-DD) o `null` para derivarlo como
+  # (última fecha de ventas - dias_operacion).
+  #
+  # Se deja en `null` a propósito: el enunciado advierte que el flujo se
+  # ejecutará sobre un periodo de datos NO PUBLICADO. Un corte fijo dejaría la
+  # bandeja vacía o desalineada si los CSV del evaluador llegan más lejos que
+  # los públicos; uno relativo se adapta solo.
+  corte_historico: null
+
+# -----------------------------------------------------------------------------
+# Fuentes
+# -----------------------------------------------------------------------------
+# tipo:
+#   hecho_diario      -> un archivo por día de datos; `latencia_dias` indica
+#                        cuántos días tarda en conocerse (arrival = date + latencia)
+#   catalogo          -> se re-publica completo cada `cadencia_dias`, e incluye
+#                        información de hasta `anticipacion_dias` en el futuro
+#   catalogo_estatico -> sólo entra en la carga histórica; no cambia
+# -----------------------------------------------------------------------------
+fuentes:
+  sales:
+    archivo: train.csv
+    tipo: hecho_diario
+    # Las ventas del día se cierran de madrugada y se transmiten al día siguiente.
+    latencia_dias: 1
+    clave: [date, store_nbr, family]
+
+  transactions:
+    archivo: transactions.csv
+    tipo: hecho_diario
+    # El consolidado de tickets del POS central tarda un día más que las ventas.
+    # Esta asimetría es deliberada: obliga al producto a tolerar que, en la fecha
+    # de corte, una fuente esté más atrasada que otra.
+    latencia_dias: 2
+    clave: [date, store_nbr]
+
+  oil:
+    archivo: oil.csv
+    tipo: hecho_diario
+    latencia_dias: 1
+    # Sólo cotiza en días hábiles. No se generan archivos para fines de semana
+    # ni feriados bursátiles: los huecos son una SITUACIÓN DE NEGOCIO esperada
+    # (INVARIANTE 5), no un error, y se resuelven con forward fill aguas abajo.
+    clave: [date]
+
+  holidays_events:
+    archivo: holidays_events.csv
+    tipo: catalogo
+    # El calendario de feriados se publica mensualmente...
+    cadencia_dias: 30
+    # ...y con anticipación: es la única fuente que informa sobre el FUTURO.
+    # Por eso un pronóstico puede usar feriados que aún no han ocurrido sin
+    # violar la corrección punto-en-el-tiempo.
+    anticipacion_dias: 60
+    clave: [date, type, locale, locale_name, description]
+
+  stores:
+    archivo: stores.csv
+    tipo: catalogo_estatico
+    clave: [store_nbr]
+
+# -----------------------------------------------------------------------------
+# Incidentes de operación
+# -----------------------------------------------------------------------------
+# Situaciones reales que el producto debe resistir. Se inyectan a propósito
+# para poder demostrar que el flujo las maneja sin intervención manual.
+# -----------------------------------------------------------------------------
+incidentes:
+  - tipo: correccion_retroactiva
+    fuente: sales
+    fecha_datos: "2017-07-05"
+    corregido_en: "2017-07-20"
+    descripcion: >
+      El POS de la tienda 44 no transmitió el 2017-07-05 y la entrega original
+      reportó ceros. El dato real se reenvía 15 días después, cuando el
+      pronóstico de esa semana ya fue publicado. Ejercita el INVARIANTE 4:
+      la corrección se añade, no sobrescribe, y la vista vigente cambia sin
+      perder lo que creíamos antes.
+    entrega_original:
+      donde: {store_nbr: 44}
+      asignar: {sales: 0.0}
+
+  - tipo: fuente_no_llega
+    fuente: transactions
+    arrival_date: "2017-07-25"
+    descripcion: >
+      Caída del sistema de POS central: ese día no hay entrega y el archivo se
+      acumula a la del día siguiente. Ejercita el INVARIANTE 5: la ausencia de
+      una fuente es una situación de negocio y NO debe hacer fallar el DAG.
