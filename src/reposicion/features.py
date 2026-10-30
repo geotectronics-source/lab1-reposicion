@@ -30,8 +30,9 @@ import numpy as np
 import pandas as pd
 
 from reposicion.config import cargar_config
-from reposicion.ingesta import leer_raw_vigente
-from reposicion.io import a_fecha
+from reposicion.ingesta import leer_raw_asof, leer_raw_vigente
+from reposicion.io import COLUMNA_LLEGADA, a_fecha
+from reposicion.landing import vista_vigente
 
 CLAVE_SERIE = ["store_nbr", "family"]
 
@@ -137,6 +138,41 @@ def features_de_serie(
     return features.reset_index()
 
 
+def _apilar(matriz: pd.DataFrame, origen: pd.Timestamp, semanas: int) -> pd.DataFrame:
+    """Pasa la ventana de la matriz a formato largo con el día de la semana."""
+    bloque = _ventana(matriz, origen, semanas * 7)
+    apilado = bloque.stack(CLAVE_SERIE, future_stack=True).rename("sales").reset_index()
+    apilado = apilado.rename(columns={"level_0": "date"})
+    apilado["dia_semana"] = apilado["date"].dt.day_of_week
+    return apilado
+
+
+def cuantiles_por_dia_de_semana(
+    matriz: pd.DataFrame, origen: pd.Timestamp, semanas: int, cuantiles: list[float]
+) -> pd.DataFrame:
+    """Cuantiles empíricos de cada serie en cada día de la semana.
+
+    Son la predicción del modelo de referencia y, a la vez, variables muy
+    informativas para el modelo de aprendizaje: resumen el nivel **y** la
+    dispersión del día concreto que se va a predecir, que es exactamente lo
+    que hay que estimar.
+
+    Se usan más semanas que para la media porque un cuantil necesita masa: con
+    cuatro observaciones, el 0.95 degenera en el máximo de la muestra.
+    """
+    if matriz.empty:
+        return pd.DataFrame()
+
+    apilado = _apilar(matriz, origen, semanas).dropna(subset=["sales"])
+    agregados = (
+        apilado.groupby([*CLAVE_SERIE, "dia_semana"])["sales"]
+        .quantile(cuantiles)
+        .unstack()
+        .rename(columns=lambda q: f"emp_q{q}")
+    )
+    return agregados.reset_index()
+
+
 def media_por_dia_de_semana(
     matriz: pd.DataFrame, origen: pd.Timestamp, semanas: int
 ) -> pd.DataFrame:
@@ -149,13 +185,9 @@ def media_por_dia_de_semana(
     if matriz.empty:
         return pd.DataFrame()
 
-    bloque = _ventana(matriz, origen, semanas * 7)
-    apilado = bloque.stack(CLAVE_SERIE, future_stack=True).rename("sales").reset_index()
-    apilado = apilado.rename(columns={"level_0": "date"})
-    apilado["dia_semana"] = apilado["date"].dt.day_of_week
-
     return (
-        apilado.groupby([*CLAVE_SERIE, "dia_semana"])["sales"]
+        _apilar(matriz, origen, semanas)
+        .groupby([*CLAVE_SERIE, "dia_semana"])["sales"]
         .mean()
         .rename("media_mismo_dia")
         .reset_index()
@@ -362,31 +394,59 @@ def features_promocion(
 # ---------------------------------------------------------------------------
 
 
+def datos_vigentes(asof: str | pd.Timestamp, *, raw=None) -> dict[str, pd.DataFrame]:
+    """Lee de una vez todas las fuentes tal como se conocían en `asof`."""
+    return {
+        fuente: leer_raw_vigente(fuente, asof, raw=raw)
+        for fuente in ("sales", "stores", "holidays_events", "transactions", "oil")
+    }
+
+
 def construir_panel(
     asof: str | pd.Timestamp,
     *,
     dias: int | None = None,
     raw=None,
     config: dict | None = None,
+    datos: dict[str, pd.DataFrame] | None = None,
 ) -> pd.DataFrame:
     """Panel de predicción: una fila por (serie, día a pronosticar).
 
     Sólo usa lo que había llegado en `asof` y, dentro de eso, sólo información
     anterior o igual al origen. El resultado no contiene la variable objetivo:
     para entrenar se añade por separado con `agregar_objetivo`.
+
+    `datos` permite reutilizar fuentes ya leídas y recortadas al `asof`
+    correspondiente. Generar los ejemplos de entrenamiento exige construir un
+    panel por cada origen simulado, y releer tres millones de filas cada vez
+    haría el entrenamiento inviable.
     """
     cfg = config or cargar_config("model")
     ventanas = cfg["features"]["ventanas"]
     horizonte = dias or cfg["pronostico"]["dias"]
 
-    ventas = leer_raw_vigente("sales", asof, raw=raw)
+    fuentes = datos if datos is not None else datos_vigentes(asof, raw=raw)
+    ventas = fuentes.get("sales", pd.DataFrame())
     if ventas.empty:
         return pd.DataFrame()
 
-    origen = origen_de(ventas)
+    emision = pd.Timestamp(asof).normalize()
+
+    # El origen nunca puede alcanzar la fecha de emisión: las ventas del día en
+    # que se emite todavía no han terminado de ocurrir, y mucho menos de
+    # transmitirse.
+    #
+    # El tope no es decorativo. La carga histórica se ingiere como una única
+    # partición con fecha de llegada muy anterior, de modo que al reconstruir
+    # una emisión pasada el filtro por `arrival_date` no la recorta: sin este
+    # tope, simular una emisión de febrero daría como origen el final del
+    # histórico, y el modelo entrenaría con meses de futuro obteniendo
+    # métricas magníficas y sin valor.
+    origen = min(origen_de(ventas), emision - pd.Timedelta(days=1))
+
     # Se pronostica la ventana que arranca en la fecha de emisión; si el origen
     # viene retrasado, `h` lo absorbe y el horizonte efectivo se alarga.
-    objetivo = pd.date_range(pd.Timestamp(asof).normalize(), periods=horizonte, freq="D")
+    objetivo = pd.date_range(emision, periods=horizonte, freq="D")
 
     matriz = matriz_de_ventas(ventas, origen)
     serie = features_de_serie(matriz, origen, ventanas, cfg["features"]["semanas_mismo_dia"])
@@ -405,14 +465,23 @@ def construir_panel(
     if not por_dia.empty:
         panel = panel.merge(por_dia, on=[*CLAVE_SERIE, "dia_semana"], how="left")
 
-    tiendas = leer_raw_vigente("stores", asof, raw=raw)
+    empiricos = cuantiles_por_dia_de_semana(
+        matriz,
+        origen,
+        cfg["features"].get("semanas_cuantiles", 12),
+        cfg["pronostico"]["cuantiles"],
+    )
+    if not empiricos.empty:
+        panel = panel.merge(empiricos, on=[*CLAVE_SERIE, "dia_semana"], how="left")
+
+    tiendas = fuentes.get("stores", pd.DataFrame())
     if not tiendas.empty:
         panel = panel.merge(
             tiendas[["store_nbr", "city", "state", "type", "cluster"]],
             on="store_nbr",
             how="left",
         )
-        holidays = leer_raw_vigente("holidays_events", asof, raw=raw)
+        holidays = fuentes.get("holidays_events", pd.DataFrame())
         if not holidays.empty:
             holidays = holidays.assign(date=a_fecha(holidays["date"]))
             panel = panel.merge(
@@ -420,7 +489,7 @@ def construir_panel(
             )
 
     panel = panel.merge(
-        features_transacciones(leer_raw_vigente("transactions", asof, raw=raw), origen, ventanas),
+        features_transacciones(fuentes.get("transactions", pd.DataFrame()), origen, ventanas),
         on="store_nbr",
         how="left",
     )
@@ -429,7 +498,7 @@ def construir_panel(
     )
 
     for nombre, valor in features_petroleo(
-        leer_raw_vigente("oil", asof, raw=raw), origen, ventanas
+        fuentes.get("oil", pd.DataFrame()), origen, ventanas
     ).items():
         panel[nombre] = valor
 
@@ -445,6 +514,77 @@ def agregar_objetivo(panel: pd.DataFrame, ventas_reales: pd.DataFrame) -> pd.Dat
     """
     objetivo = ventas_reales[[*CLAVE_SERIE, "date", "sales"]].rename(columns={"sales": "y"})
     return panel.merge(objetivo, on=[*CLAVE_SERIE, "date"], how="inner")
+
+
+def construir_entrenamiento(
+    asof: str | pd.Timestamp,
+    *,
+    raw=None,
+    config: dict | None = None,
+    progreso: bool = False,
+) -> pd.DataFrame:
+    """Genera ejemplos históricos simulando emisiones pasadas.
+
+    La distinción que hace honesto el entrenamiento:
+
+    - Las **variables explicativas** salen de lo que se sabía en cada emisión
+      simulada. Si la tienda 44 reportó ceros ese día, el ejemplo lleva ceros:
+      es exactamente lo que el modelo verá en producción.
+    - La **variable objetivo** sale de la verdad final, ya corregida. Es lo que
+      de verdad ocurrió, y es contra eso que debe aprender.
+
+    Entrenar las variables con los datos corregidos sería fuga: el modelo
+    aprendería con una calidad de información que nunca tendrá al predecir.
+    """
+    cfg = config or cargar_config("model")
+    ent = cfg["entrenamiento"]
+
+    # Historial completo de lo recibido, con su fecha de llegada, leído una
+    # sola vez: cada origen se obtiene recortando esto en memoria.
+    crudos = {
+        fuente: leer_raw_asof(fuente, asof, raw=raw)
+        for fuente in ("sales", "stores", "holidays_events", "transactions", "oil")
+    }
+    if crudos["sales"].empty:
+        return pd.DataFrame()
+
+    verdad = vista_vigente(crudos["sales"], "sales")
+    origenes = origenes_de_entrenamiento(
+        pd.Timestamp(asof).normalize(),
+        int(ent["cadencia_origenes_dias"]),
+        int(ent["ventana_dias"]),
+    )
+
+    paneles: list[pd.DataFrame] = []
+    for numero, emision in enumerate(origenes, 1):
+        datos = {
+            fuente: vista_vigente(df[df[COLUMNA_LLEGADA] <= emision], fuente)
+            for fuente, df in crudos.items()
+            if not df.empty
+        }
+        if datos.get("sales", pd.DataFrame()).empty:
+            continue
+
+        panel = construir_panel(emision, config=cfg, datos=datos)
+        if panel.empty:
+            continue
+
+        con_objetivo = agregar_objetivo(panel, verdad)
+        if not con_objetivo.empty:
+            paneles.append(con_objetivo)
+        if progreso:
+            print(f"  origen {numero}/{len(origenes)} {emision:%Y-%m-%d}: {len(con_objetivo):,}")
+
+    if not paneles:
+        return pd.DataFrame()
+
+    entrenamiento = pd.concat(paneles, ignore_index=True)
+
+    # Series sin historia suficiente no entran: no hay con qué estimar su
+    # nivel ni su estacionalidad, y meterlas sólo añade ruido. En producción
+    # esas series caen al modelo de referencia.
+    minimo = int(ent.get("minimo_dias_historia", 0))
+    return entrenamiento[entrenamiento["dias_historia"] >= minimo].reset_index(drop=True)
 
 
 def origenes_de_entrenamiento(

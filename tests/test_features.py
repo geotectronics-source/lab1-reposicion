@@ -31,8 +31,13 @@ from reposicion.io import marcar_llegada, ruta_particion
 from reposicion.landing import ARRIVAL_HISTORICO
 
 CONFIG = {
-    "pronostico": {"dias": 7},
-    "features": {"ventanas": [7, 14], "semanas_mismo_dia": 4, "dias_de_pago": [15, "ultimo"]},
+    "pronostico": {"dias": 7, "cuantiles": [0.5, 0.9]},
+    "features": {
+        "ventanas": [7, 14],
+        "semanas_mismo_dia": 4,
+        "semanas_cuantiles": 8,
+        "dias_de_pago": [15, "ultimo"],
+    },
 }
 
 VENTANAS = [7, 14]
@@ -426,6 +431,18 @@ def test_el_panel_tiene_una_fila_por_serie_y_dia(raw_minimo):
     series = panel.groupby(["store_nbr", "family"]).ngroups
     assert len(panel) == series * 7
     assert sorted(panel["h"].unique()) == [1, 2, 3, 4, 5, 6, 7]
+
+
+def test_el_origen_nunca_alcanza_la_fecha_de_emision(raw_minimo):
+    """Regresión: la carga histórica se ingiere con una fecha de llegada muy
+    anterior, así que al reconstruir una emisión pasada el filtro por
+    `arrival_date` no la recorta. Sin un tope explícito, simular una emisión
+    de febrero tomaba como origen el final del histórico y el modelo entrenaba
+    con meses de futuro, con métricas magníficas y sin ningún valor.
+    """
+    for emision in ("2017-06-01", "2017-07-01", "2017-07-17"):
+        panel = construir_panel(emision, raw=raw_minimo, config=CONFIG)
+        assert panel["origen"].max() < pd.Timestamp(emision), emision
 
 
 def test_el_panel_no_trae_la_variable_objetivo(raw_minimo):
