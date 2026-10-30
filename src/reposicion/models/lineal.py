@@ -47,6 +47,31 @@ from reposicion.models.base import columna, ordenar_cuantiles, predictoras
 # preprocesamiento correcto depende de la familia de modelos.
 A_CODIFICAR = ("store_nbr", "family")
 
+# Variables expresadas en unidades de venta, de transacciones o de precio, que
+# se transforman con log1p antes de estandarizar.
+#
+# El modelo predice `log1p(y)`, así que la relación correcta con el nivel de
+# la serie es logarítmica: duplicar la venta histórica suma una constante al
+# logaritmo, no un múltiplo del nivel. Pasar `media_56` en unidades (0 a
+# 11.594) contra un objetivo logarítmico es un error de especificación, y el
+# modelo responde ignorando esas variables y prediciendo casi sólo por
+# familia.
+#
+# El modelo de árboles no lo sufre: aprende cualquier relación monótona
+# partiendo el rango, de modo que la transformación le resulta indiferente.
+# Es otro caso donde el preprocesamiento depende de la familia de modelos.
+EN_UNIDADES = (
+    "ventas_",
+    "media_",
+    "mediana_",
+    "max_",
+    "desv_",
+    "emp_q",
+    "trans_media_",
+    "promo_media_",
+    "petroleo_",
+)
+
 
 class RegresionCuantilicaLineal:
     """Minimiza la pérdida pinball sobre un modelo lineal, con descenso de gradiente."""
@@ -88,7 +113,14 @@ class RegresionCuantilicaLineal:
             for c in self.columnas
             if c not in A_CODIFICAR and pd.api.types.is_numeric_dtype(panel[c])
         ]
-        bloques = [panel[numericas].astype(float).to_numpy()]
+        bruto = panel[numericas].astype(float).to_numpy()
+        # Las columnas en unidades pasan a escala logarítmica, la misma del
+        # objetivo. Sin esto el modelo no puede usar el nivel de la serie.
+        en_unidades = np.array([c.startswith(EN_UNIDADES) for c in numericas])
+        if en_unidades.any():
+            bruto[:, en_unidades] = np.log1p(np.maximum(0.0, bruto[:, en_unidades]))
+
+        bloques = [bruto]
         nombres = list(numericas)
 
         for col in A_CODIFICAR:

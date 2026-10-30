@@ -6,6 +6,74 @@ intuición ni de la costumbre.
 
 ---
 
+## 0. Los tres modelos y por qué gana el que gana
+
+Validación de origen móvil, 3 pliegues de 28 días, 1.297.296 ejemplos de 105 orígenes
+semanales. Los tres modelos ven exactamente los mismos pliegues y los mismos ejemplos.
+
+| Modelo | Costo negocio | Pinball | MAE | RMSLE | Cobertura 0,95 |
+|---|---|---|---|---|---|
+| **lgbm cuantílico** | **105,95** | **20,21** | **58,74** | **0,401** | 0,951 |
+| baseline estacional | 130,52 | 25,22 | 69,12 | 0,507 | 0,909 |
+| lineal cuantílico | 186,97 | 34,49 | 105,51 | 0,436 | 0,976 |
+
+```
+lineal vs baseline: MANTENER  (p1: -100,7 %, p2: -19,3 %, p3: -8,3 %)
+lgbm   vs baseline: PROMOVER  (p1: +14,7 %, p2: +17,5 %, p3: +23,8 %)
+lgbm   vs lineal:   PROMOVER  (p1: +57,5 %, p2: +30,8 %, p3: +29,6 %)
+```
+
+### El resultado que justifica toda la arquitectura de decisión
+
+El modelo lineal **gana al baseline en RMSLE** (0,436 frente a 0,507) y **pierde en costo de
+negocio** (187 frente a 131). Las dos métricas señalan modelos distintos.
+
+Elegir por el error estadístico habría promovido el lineal y empeorado el resultado del negocio
+en unos 56 puntos de costo por serie y día. Es la demostración empírica de por qué el criterio
+de promoción está definido sobre el costo y no sobre el error, y de por qué el enunciado pide
+una métrica de negocio además de las técnicas.
+
+La explicación está en la cobertura: el lineal sobrecubre (0,976 donde debería dar 0,95), es
+decir predice cuantiles demasiado altos. En error relativo eso penaliza poco; en inventario
+real se traduce en merma. El RMSLE mide la distancia en escala logarítmica, donde pasarse en
+una serie grande apenas cuenta; el costo la mide en unidades, que es donde el dinero ocurre.
+
+### Por qué se conserva el lineal aunque no se promueva
+
+No entra en producción, pero sí en la comparación, por tres motivos:
+
+1. **Audita el preprocesamiento.** Ver la sección 0.1: detectó un error de especificación que el
+   modelo de árboles absorbía en silencio.
+2. **Acota la no linealidad.** Que un modelo aditivo quede un 43 % por detrás indica que las
+   interacciones entre nivel, día de la semana y horizonte son esenciales, no accesorias.
+3. **Es el plan de contingencia.** Si el modelo de árboles fallara o se desajustara, existe un
+   tercer escalón auditable entre el baseline y el GBM.
+
+### 0.1 El modelo lineal encontró un error en el preprocesamiento
+
+En su primera medición el lineal dio un costo de 911, siete veces peor que el baseline. Los
+coeficientes explicaron por qué: las doce variables de mayor peso eran todas indicadoras de
+`family`, y **ninguna variable de nivel**. El modelo predecía el típico de cada familia
+ignorando cuánto vende cada serie concreta.
+
+La causa era un error de especificación: el objetivo es `log1p(y)` pero las variables de nivel
+se pasaban en unidades originales (`media_56` recorre de 0 a 11.594). La relación real entre el
+nivel de una serie y el logaritmo de sus ventas es logarítmica, y al forzar una relación lineal
+el ajuste óptimo consiste en ignorar esas variables.
+
+Tras transformar las variables en unidades a escala logarítmica, el costo bajó de 911 a 187 y
+los coeficientes pasaron a ser los esperables: `emp_q0.5`, `media_mismo_dia`, `media_7`.
+
+Lo relevante es que **el error llevaba ahí desde que se construyó el panel y el modelo de
+árboles no lo manifestaba**: un GBM aprende cualquier relación monótona partiendo el rango, así
+que la transformación le resulta indiferente. Hizo falta un modelo que no pudiera compensar la
+mala especificación para que el defecto se hiciera visible.
+
+Es el argumento más sólido para tener dos familias de modelos: la segunda no sirve sólo para
+comparar rendimiento, sino para **auditar el preprocesamiento de la primera**.
+
+---
+
 ## 1. Deep learning: evaluado y descartado
 
 El enunciado permite usar modelos de aprendizaje profundo y pide justificar la decisión en
