@@ -9,6 +9,7 @@ import pytest
 from reposicion.models.base import ordenar_cuantiles, predictoras
 from reposicion.models.baseline import BaselineEstacional
 from reposicion.models.lgbm import LightGBMCuantilico
+from reposicion.models.lineal import RegresionCuantilicaLineal
 from reposicion.validacion import (
     Pliegue,
     decidir_promocion,
@@ -165,6 +166,104 @@ def test_predecir_sin_las_variables_de_entrenamiento_falla():
 
     with pytest.raises(ValueError, match="Faltan variables"):
         modelo.predecir(panel.drop(columns="media_7"))
+
+
+# ---------------------------------------------------------------------------
+# Regresión cuantílica lineal
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("q", [0.1, 0.5, 0.9])
+def test_coincide_con_la_implementacion_exacta_de_sklearn(q: float):
+    """La prueba que permite confiar en una implementación propia.
+
+    `QuantileRegressor` resuelve el mismo problema con un programa lineal
+    exacto, pero su costo lo hace inviable sobre 1,3 millones de ejemplos.
+    Aquí se comprueba, en un caso pequeño donde sí es viable, que el descenso
+    de gradiente llega a la misma solución: la pérdida pinball es convexa, así
+    que el óptimo es único y ambas rutas deben converger a él.
+    """
+    from sklearn.linear_model import QuantileRegressor
+
+    rng = np.random.default_rng(0)
+    X = rng.normal(size=(2000, 4))
+    beta = np.array([2.0, -1.5, 0.8, 0.0])
+    y = X @ beta + rng.normal(0, 1.0, 2000)
+
+    exacto = QuantileRegressor(quantile=q, alpha=1e-4, solver="highs").fit(X, y)
+
+    modelo = RegresionCuantilicaLineal([q], epocas=120, tam_lote=512)
+    modelo.medias, modelo.escalas = np.zeros(4), np.ones(4)
+    w, b = modelo._ajustar_un_cuantil(X, y, q)
+
+    np.testing.assert_allclose(w, exacto.coef_, atol=0.1)
+    assert b == pytest.approx(exacto.intercept_, abs=0.1)
+
+
+def test_el_lineal_recupera_los_coeficientes_verdaderos():
+    rng = np.random.default_rng(1)
+    X = rng.normal(size=(3000, 3))
+    y = X @ np.array([1.0, -2.0, 0.5]) + rng.normal(0, 0.5, 3000)
+
+    modelo = RegresionCuantilicaLineal([0.5], epocas=120, tam_lote=512)
+    modelo.medias, modelo.escalas = np.zeros(3), np.ones(3)
+    w, _ = modelo._ajustar_un_cuantil(X, y, 0.5)
+
+    np.testing.assert_allclose(w, [1.0, -2.0, 0.5], atol=0.15)
+
+
+def test_los_cuantiles_del_lineal_se_separan_correctamente():
+    """Con ruido simétrico, los cuantiles deben quedar a distancias simétricas
+    del centro: es la comprobación de que la pérdida asimétrica funciona."""
+    rng = np.random.default_rng(2)
+    X = rng.normal(size=(3000, 2))
+    y = X @ np.array([1.0, 1.0]) + rng.normal(0, 1.0, 3000)
+
+    sesgos = {}
+    for q in (0.1, 0.5, 0.9):
+        modelo = RegresionCuantilicaLineal([q], epocas=120, tam_lote=512)
+        modelo.medias, modelo.escalas = np.zeros(2), np.ones(2)
+        _, sesgos[q] = modelo._ajustar_un_cuantil(X, y, q)
+
+    assert sesgos[0.1] < sesgos[0.5] < sesgos[0.9]
+    # Los cuantiles 0,1 y 0,9 de una normal estándar están a +-1,28.
+    assert sesgos[0.9] - sesgos[0.5] == pytest.approx(1.28, abs=0.25)
+
+
+def test_el_lineal_respeta_el_orden_de_los_cuantiles():
+    panel = _panel(400)
+    pred = RegresionCuantilicaLineal(CUANTILES, epocas=15).entrenar(panel).predecir(panel)
+    assert (pred["q0.9"] >= pred["q0.5"]).all()
+
+
+def test_el_lineal_nunca_predice_negativo():
+    panel = _panel(300)
+    pred = RegresionCuantilicaLineal(CUANTILES, epocas=15).entrenar(panel).predecir(panel)
+    assert (pred["q0.5"] >= 0).all()
+
+
+def test_el_lineal_tolera_valores_ausentes():
+    """Tras centrar, un ausente pasa a ser el valor típico: la imputación más
+    neutra para un modelo lineal."""
+    panel = _panel(300)
+    panel.loc[panel.index[:50], "media_7"] = np.nan
+
+    pred = RegresionCuantilicaLineal(CUANTILES, epocas=15).entrenar(panel).predecir(panel)
+    assert pred["q0.5"].notna().all()
+
+
+def test_el_lineal_es_interpretable():
+    """La ventaja que no da el modelo de árboles: coeficientes legibles."""
+    modelo = RegresionCuantilicaLineal(CUANTILES, epocas=15).entrenar(_panel(300))
+    tabla = modelo.coeficientes_ordenados(0.5, top=5)
+
+    assert list(tabla.columns) == ["variable", "coeficiente"]
+    assert len(tabla) == 5
+
+
+def test_el_lineal_sin_entrenar_falla_claramente():
+    with pytest.raises(RuntimeError, match="no ha sido entrenado"):
+        RegresionCuantilicaLineal(CUANTILES).predecir(_panel())
 
 
 # ---------------------------------------------------------------------------
