@@ -97,6 +97,10 @@ del negocio **nunca** provocan una falla del DAG.
 - Los PR requieren que `pytest` pase en GitHub Actions.
 - Mensajes de commit en imperativo y en español, explicando el *por qué* cuando no es obvio.
 - Nunca commitear: datos, modelos, `.venv`, credenciales, logs de Airflow.
+- Un cambio **mecánico y masivo** sobre archivos que DVC hashea —reformateo, finales de línea,
+  renombrado automático— lleva `dvc repro` **en el mismo commit**. DVC compara bytes, no
+  significado: un cambio de espacios en blanco en `src/` invalida el lock de todas las etapas
+  que dependen del código, y un lock que describe un código que ya no está es un lock que miente.
 
 ## 6. Pruebas
 
