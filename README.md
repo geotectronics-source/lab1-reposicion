@@ -116,7 +116,7 @@ Cada etapa se invoca por la misma orden que usará Airflow, que es la única fro
 orquestación y producto:
 
 ```bash
-uv run python -m reposicion pronosticar --asof 2017-08-14
+uv run python -m reposicion pronosticar --asof 2017-07-17
 ```
 
 `--asof` es obligatorio en todas y nunca tiene valor por defecto: la fecha lógica entra desde
@@ -311,23 +311,24 @@ grafo los separa en vez de confundirlos. Para obtener sólo el pedido nuevo:
 ```console
 $ uv run dvc repro -s pedido
 Running stage 'pedido':
-1,782 series  ·  5,993,661 unidades  ·  187 linea(s) recortada(s) por el tope
--> data/pedidos/asof=2017-08-14/explicacion.csv  (0.1 s)
+1,782 series  ·  6,874,460 unidades  ·  127 linea(s) recortada(s) por el tope
+-> data/pedidos/asof=2017-07-17/explicacion.csv  (0.2 s)
 ```
 
-**0,1 segundos. Cero líneas de Python. Cero reentrenamientos.**
+**Dos décimas de segundo. Cero líneas de Python. Cero reentrenamientos.**
 
 | Familia | q\* antes | Cuantil usado | q\* después | Cuantil usado | Pedido |
 |---|---|---|---|---|---|
-| PRODUCE | 0,429 | 0,5 | 0,692 | 0,8 | +5,8 % |
-| GROCERY I | 0,857 | 0,9 | 0,947 | 0,95 | +6,0 % |
-| CLEANING | 0,857 | 0,9 | 0,947 | 0,95 | +19,2 % |
+| PRODUCE | 0,429 | 0,5 | 0,692 | 0,8 | +7,7 % |
+| DAIRY | 0,500 | 0,5 | 0,750 | 0,8 | +7,3 % |
+| GROCERY I | 0,857 | 0,9 | 0,947 | 0,95 | +5,5 % |
+| CLEANING | 0,857 | 0,9 | 0,947 | 0,95 | +14,5 % |
 | **EGGS** | 0,727 | 0,8 | **0,727** | **0,8** | **sin cambio** |
 
 ```
-total antes:   5.554.337 unidades
-total después: 5.993.661 unidades      (+7,9 %)
-líneas topadas:       68  ->  187
+total antes:   6.351.166 unidades
+total después: 6.874.460 unidades      (+8,2 %)
+líneas topadas:        8  ->  127
 ```
 
 El detalle de `EGGS` es el que confirma que la mecánica es la correcta: no se mueve porque tiene
@@ -349,7 +350,7 @@ El de Airflow es temporal y contesta *«¿corrió lo que tocaba el 25 de julio?�
 Lo que mantiene honestos a los dos es que **ejecutan exactamente la misma orden**:
 
 ```bash
-python -m reposicion pronosticar --asof 2017-08-14
+python -m reposicion pronosticar --asof 2017-07-17
 ```
 
 Si Airflow llamara a una función de Python y DVC a un script propio, «lo que se reproduce» y «lo
