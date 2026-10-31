@@ -176,6 +176,16 @@ def ingerir(
     )
 
 
+def tiene_carga_inicial(fuente: str, *, raw: Path | None = None) -> bool:
+    """Si el almacén ya contiene la carga histórica de `fuente`.
+
+    Lo consulta el modo incremental: añadir la llegada de un día sobre un
+    almacén que nunca recibió el histórico daría un almacén que parece válido
+    y no tiene con qué calcular una media móvil de 56 días.
+    """
+    return ruta_particion(raw or rutas().raw, fuente, ARRIVAL_HISTORICO).exists()
+
+
 def ingerir_historico(
     fuente: str, *, landing: Path | None = None, raw: Path | None = None
 ) -> ResultadoIngesta:

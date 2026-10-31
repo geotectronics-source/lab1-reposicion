@@ -95,9 +95,9 @@ stages:
       nfiles: 145
     - path: src/reposicion
       hash: md5
-      md5: 7d99755b7aeac3c3f67c9c44226f0727.dir
-      size: 128075
-      nfiles: 19
+      md5: 805db7f1decc46c00c6249c7a3a25b2c.dir
+      size: 159516
+      nfiles: 21
     params:
       config/pipeline.yaml:
         asof: '2017-07-17'
@@ -117,9 +117,9 @@ stages:
       nfiles: 47
     - path: src/reposicion
       hash: md5
-      md5: 7d99755b7aeac3c3f67c9c44226f0727.dir
-      size: 128075
-      nfiles: 19
+      md5: 805db7f1decc46c00c6249c7a3a25b2c.dir
+      size: 159516
+      nfiles: 21
     params:
       config/model.yaml:
         entrenamiento:
@@ -161,9 +161,9 @@ stages:
       size: 49236988
     - path: src/reposicion
       hash: md5
-      md5: 7d99755b7aeac3c3f67c9c44226f0727.dir
-      size: 128075
-      nfiles: 19
+      md5: 805db7f1decc46c00c6249c7a3a25b2c.dir
+      size: 159516
+      nfiles: 21
     params:
       config/costs.yaml:
         defaults:
@@ -243,9 +243,9 @@ stages:
       size: 607
     - path: src/reposicion
       hash: md5
-      md5: 7d99755b7aeac3c3f67c9c44226f0727.dir
-      size: 128075
-      nfiles: 19
+      md5: 805db7f1decc46c00c6249c7a3a25b2c.dir
+      size: 159516
+      nfiles: 21
     params:
       config/pipeline.yaml:
         asof: '2017-07-17'
@@ -270,9 +270,9 @@ stages:
       nfiles: 2
     - path: src/reposicion
       hash: md5
-      md5: 7d99755b7aeac3c3f67c9c44226f0727.dir
-      size: 128075
-      nfiles: 19
+      md5: 805db7f1decc46c00c6249c7a3a25b2c.dir
+      size: 159516
+      nfiles: 21
     params:
       config/model.yaml:
         entrenamiento:
@@ -301,10 +301,11 @@ stages:
       config/pipeline.yaml:
         asof: '2017-07-17'
     outs:
-    - path: data/pronosticos/asof=2017-07-17/pronostico.parquet
+    - path: data/pronosticos/asof=2017-07-17
       hash: md5
-      md5: a1d3f7cae1ec024f93078341eca41a26
-      size: 1032698
+      md5: 47b604f42392ef96847e02de0cf0ef0c.dir
+      size: 1032957
+      nfiles: 2
   pedido:
     cmd: python -m reposicion pedir --asof 2017-07-17
     deps:
@@ -314,9 +315,9 @@ stages:
       size: 1032698
     - path: src/reposicion
       hash: md5
-      md5: 7d99755b7aeac3c3f67c9c44226f0727.dir
-      size: 128075
-      nfiles: 19
+      md5: 805db7f1decc46c00c6249c7a3a25b2c.dir
+      size: 159516
+      nfiles: 21
     params:
       config/costs.yaml:
         defaults:

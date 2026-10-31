@@ -38,7 +38,11 @@ la recomendación sin tocar una línea de Python ni reentrenar el modelo** — v
 |---|---|---|
 | Pronóstico cuantílico diario por tienda × familia | `data/pronosticos/asof=<fecha>/` | insumo interno |
 | Pedido sugerido de la semana | `data/pedidos/asof=<fecha>/` (Parquet + CSV) | gerente de tienda y centro de distribución |
-| Métricas y decisión de promoción del modelo | `reportes/asof=<fecha>/` (en Git) | quien mantiene el modelo |
+| Desempeño realizado de los pedidos ya publicados | `data/seguimiento/asof=<fecha>/` | quien responde por el inventario |
+
+Y una cuarta que no es una salida de negocio sino la **pista de auditoría del modelo**: las
+métricas y la decisión de promoción en `reportes/asof=<fecha>/`, que sí van a Git para que el
+historial conteste con qué números opera cada modelo y desde cuándo.
 
 ---
 
@@ -72,7 +76,7 @@ nada de lo que sigue.
 
 ```bash
 uv sync                      # crea el entorno a partir de uv.lock
-uv run pytest                # 237 pruebas, sin Airflow y sin Docker
+uv run pytest                # 310 pruebas, sin Airflow y sin Docker
 uv run ruff check .
 ```
 
@@ -117,6 +121,11 @@ uv run python -m reposicion pronosticar --asof 2017-08-14
 
 `--asof` es obligatorio en todas y nunca tiene valor por defecto: la fecha lógica entra desde
 fuera o no se ejecuta nada.
+
+Hay **dos órdenes más que no son etapas de DVC**, porque no participan en producir una emisión:
+`auditar` registra el estado de las fuentes y `seguir` mide el desempeño de lo ya publicado. Son
+tareas de operación y viven sólo en los DAGs; la razón está en
+[Operación con Airflow 3](#operación-con-airflow-3).
 
 ---
 
@@ -315,6 +324,351 @@ que sostiene la reproducción de un pronóstico pasado.
 
 ---
 
+## Operación con Airflow 3
+
+DVC y Airflow resuelven dos problemas que se confunden a menudo. **DVC reproduce; Airflow
+opera.** El grafo de DVC es estático y contesta *«¿esta salida corresponde a estas entradas?»*.
+El de Airflow es temporal y contesta *«¿corrió lo que tocaba el 25 de julio?»*.
+
+Lo que mantiene honestos a los dos es que **ejecutan exactamente la misma orden**:
+
+```bash
+python -m reposicion pronosticar --asof 2017-08-14
+```
+
+Si Airflow llamara a una función de Python y DVC a un script propio, «lo que se reproduce» y «lo
+que opera» serían dos cosas distintas y podrían separarse sin que nada avisara. Hay una prueba
+que falla si un DAG importa `reposicion` ([`test_dags.py`](tests/test_dags.py)).
+
+Airflow tampoco llama a `dvc repro`, y también es deliberado: DVC se saltaría la etapa cuando su
+salida ya está al día —y una tarea programada tiene que correr cuando le toca, no cuando a la
+caché le parece— y además escribiría `dvc.lock`, que es un archivo de Git. Un orquestador que
+modifica archivos versionados en cada corrida convierte el repositorio en un diario de
+ejecuciones.
+
+### Puesta en marcha
+
+Requiere Docker. La imagen extiende la oficial de Airflow 3.3.2 con las dependencias del
+producto, fijadas desde `uv.lock`.
+
+```bash
+cp docker/.env.ejemplo docker/.env
+```
+
+```bash
+cd docker && docker compose up -d --build
+```
+
+La interfaz queda en `http://localhost:8080`, usuario y contraseña `airflow`. Si ya tienes algo
+escuchando en ese puerto —otro Airflow, por ejemplo, que es más común de lo que parece en cuanto
+se tiene más de un proyecto con Docker— cambia `AIRFLOW_PORT` en `docker/.env`.
+
+El repositorio se monta en `/opt/proyecto` y `REPOSICION_HOME` apunta ahí, así que **lo que corre
+Airflow es el commit que está en tu disco**: no hay que reconstruir la imagen para probar un
+cambio de código. La imagen lleva las dependencias; el volumen, el producto.
+
+Para comprobar que quedó bien, dos órdenes. La primera no necesita credenciales:
+
+```bash
+curl -s http://localhost:8080/api/v2/monitor/health
+```
+
+```
+{"metadatabase":{"status":"healthy"},"scheduler":{"status":"healthy",...},
+ "triggerer":{"status":"healthy",...},"dag_processor":{"status":"healthy",...}}
+```
+
+La segunda es la verificación que las pruebas de `pytest` **no pueden hacer**, porque corren sin
+Airflow: que los cuatro DAGs se importen de verdad.
+
+```bash
+docker compose run --rm cli dags list
+```
+
+```
+dag_id                | fileloc                                    | owners
+======================+============================================+============
+forecast_pedido       | /opt/airflow/dags/forecast_pedido.py       | reposicion
+ingesta_fuentes       | /opt/airflow/dags/ingesta_fuentes.py       | reposicion
+reentrenamiento       | /opt/airflow/dags/reentrenamiento.py       | reposicion
+seguimiento_desempeno | /opt/airflow/dags/seguimiento_desempeno.py | reposicion
+```
+
+Las pruebas estáticas de `test_dags.py` comprueban que ningún DAG importe el producto ni contenga
+lógica, pero no ejecutan nada: un DAG puede pasarlas y fallar al importarse. De hecho pasó —ver
+`libgomp` en [`DECISIONES.md` §3.6](DECISIONES.md)—, y por eso esta orden es parte de la puesta en
+marcha y no un extra.
+
+### Los cuatro DAGs
+
+Uno por cadencia real. Ninguno existe para rellenar un hueco del enunciado.
+
+| DAG | Cuándo | Tareas | Qué produce |
+|---|---|---|---|
+| [`ingesta_fuentes`](dags/ingesta_fuentes.py) | diario 06:00 | `ingesta` → `auditar` | el almacén y el reporte de calidad del día |
+| [`forecast_pedido`](dags/forecast_pedido.py) | lunes 07:00 | `auditar` → `pronosticar` → `pedir` | el pronóstico y el pedido de la semana |
+| [`seguimiento_desempeno`](dags/seguimiento_desempeno.py) | diario 08:00 | `seguir` | el desempeño realizado de lo ya publicado |
+| [`reentrenamiento`](dags/reentrenamiento.py) | día 1 del mes 03:00 | `panel` → `validar` → `modelo` | la decisión de promoción y el modelo |
+
+**Por qué no uno solo.** Las cadencias son distintas y no divisibles: las fuentes llegan a
+diario, el pedido se emite los lunes y reentrenar cuesta quince minutos. Un único DAG obligaría
+a la cadencia más fina, y seis de cada siete corridas serían quince minutos de cómputo para
+confirmar lo que ya operaba.
+
+**Por qué el panel vive en el reentrenamiento y no en un DAG diario.** El panel sólo lo consume
+la validación. Construirlo cada mañana serían cinco minutos diarios para un consumidor mensual;
+el pronóstico no lo necesita, porque calcula sus propias variables sobre el almacén.
+
+### Dos relojes: la emisión y el modelo
+
+El pedido sale cada lunes y el modelo se reentrena una vez al mes, así que **la mayoría de los
+lunes no existe ningún `models/asof=<ese lunes>`**. `pronosticar` carga el *modelo vigente*: el
+último registrado con fecha ≤ la fecha lógica.
+
+La segunda mitad de esa regla es la que importa. Tomar simplemente el último modelo haría que un
+backfill de julio usara el modelo entrenado en agosto, y el resultado sería mejor que el que el
+producto habría dado de verdad ese día: **el backfill mentiría a su favor**. Por eso el filtro
+punto-en-el-tiempo se aplica también al registro de modelos.
+
+Una sola regla cubre las dos situaciones. Cuando el pipeline de DVC acaba de entrenar para
+`asof`, esa versión *es* la más reciente ≤ `asof`, de modo que DVC y Airflow siguen ejecutando
+lo mismo. Qué versión atendió cada emisión queda escrito en `emision.json`, y es lo que permite
+al seguimiento contestar *«¿empeoró desde que cambiamos de modelo?»*.
+
+### Un hueco de entrega no es un fallo
+
+El INVARIANTE 5 puesto en código. La tarea `auditar` separa dos cosas que desde fuera se ven
+igual —en ambas no hay datos nuevos— y piden arreglos opuestos:
+
+| Situación | Veredicto | Qué pasa |
+|---|---|---|
+| El petróleo no cotiza el domingo | `hueco` | se anota y se sigue con lo último conocido |
+| El POS central no entregó hoy | `hueco` | igual: el run termina en verde |
+| Las ventas llevan ocho días sin dato nuevo | `atrasado` | **la tarea falla**: la ingesta no corrió |
+| Una fuente no tiene ni un registro | `sin datos` | **la tarea falla**: el despliegue está incompleto |
+
+El umbral que las separa es una decisión de negocio y vive en
+[`config/seguimiento.yaml`](config/seguimiento.yaml), no en el código.
+
+El retraso se mide sobre `date` —a qué día se refieren los datos— y nunca sobre `arrival_date`.
+Medido sobre la llegada, una entrega de hoy con datos de hace dos semanas daría retraso cero, y
+la auditoría daría luz verde a un almacén al que le faltan trece días.
+
+`auditar` aparece en dos DAGs, y no es un descuido: en el de ingesta es el registro diario del
+estado de las fuentes; en el de emisión es una compuerta. Sin ella, emitir un lunes cuya ingesta
+nunca corrió daría un pronóstico impecable calculado sobre datos de la semana anterior, y nada
+en el resultado delataría el problema.
+
+### El seguimiento es la tarea que DVC no puede expresar
+
+Hay una etapa del producto que **no aparece en `dvc.yaml`**, y la razón es la mejor
+justificación de por qué el laboratorio pide las dos herramientas.
+
+La entrada del seguimiento es *«todas las emisiones pasadas cuyo horizonte ya se realizó»*. Eso
+no es una arista fija de un grafo: es una consulta que depende de la fecha en que se corre. DVC
+declara dependencias entre archivos concretos y no tiene forma de escribirla. Un orquestador con
+fecha lógica, sí.
+
+Lo que mide:
+
+- el **costo realizado** de cada pedido publicado, en la misma moneda con la que se eligió el
+  modelo: `cu · faltante + co · sobrante`;
+- la **cobertura efectiva** del cuantil que usó la política: si pide cubrir el 90 % y en
+  operación cubre el 78 %, el pedido se queda corto más seguido de lo que el negocio aceptó, y
+  el error medio puede verse perfectamente bien;
+- el desvío contra el **costo con el que se validó el modelo que atendió esa emisión**, no
+  contra la emisión anterior: lo que se vigila es si el modelo cumple la promesa con la que se
+  promovió, no cómo vino la semana.
+
+Tres atajos que habrían convertido la métrica en propaganda, cada uno con su prueba:
+
+1. **Rellenar con cero** el día cuyo dato aún no ha llegado. Inventaría una merma que nadie tuvo
+   y haría ver mal a un modelo que acertó. El cruce es interno y se informa qué fracción del
+   horizonte ya se puede calificar.
+2. **Medir con lo que sabemos hoy** en vez de con lo que se sabía en la fecha lógica. Daría una
+   cifra más exacta y **no reproducible**: cambiaría sola cada vez que llega una corrección, y
+   una métrica de monitoreo que se mueve por su cuenta no detecta nada.
+3. **Calificar una emisión posterior** a la fecha lógica, que durante un backfill ya existe en
+   el disco.
+
+Y un modelo que se degrada **no hace fallar el DAG**. Es una situación de negocio: la alerta
+queda en el log y en `desempeno.json`, y la decisión de reentrenar es de una persona. Hacer caer
+la tarea dejaría al día siguiente sin medición, que es justo cuando hace falta mirarla.
+
+### El backfill, corrido de verdad
+
+No es una captura de pantalla de la interfaz: son las corridas que produjeron los archivos que
+están en `data/`.
+
+```bash
+airflow backfill create --dag-id ingesta_fuentes --from-date 2017-07-18 --to-date 2017-08-20
+```
+
+#### Un hueco de entrega declarado, resuelto sin intervención
+
+`config/sources.yaml` inyecta a propósito una caída del POS central el 2017-07-25. El reporte de
+calidad de ese día y del siguiente, tal como los dejó el DAG:
+
+```
+2017-07-25   fuente        estado   ultimo_dato  retraso  filas_en_asof
+             transactions  hueco    2017-07-22         3              0
+             sales         al dia   2017-07-24         1          1.782
+
+2017-07-26   transactions  al dia   2017-07-24         2            108
+```
+
+El run del 25 terminó **en verde** con la fuente ausente, y el 26 llegaron 108 filas: las dos
+entregas acumuladas, 54 de cada día. Es exactamente lo que describe el incidente, y nadie tuvo
+que tocar nada.
+
+#### Una corrección retroactiva, contada con precisión
+
+El otro incidente declarado: el POS de la tienda 44 reportó ceros el 2017-07-05 y el dato real se
+reenvía quince días después, cuando el pronóstico de esa semana ya estaba publicado. El reporte
+del 2017-07-20:
+
+```
+sales reenvio 1.782 fila(s) ya conocidas, de las que 30 cambian de valor
+```
+
+Las dos cifras dicen cosas distintas y por eso están las dos. El sistema origen reenvió **el día
+completo** —1.782 filas, como hace un sistema real—, pero sólo 30 traían un valor distinto. Y 30,
+no 33: la tienda 44 tiene 33 familias, y BABY CARE, BOOKS y HOME APPLIANCES vendieron de verdad
+cero ese día, así que para esas tres el «cero» original era correcto.
+
+La primera versión de esta auditoría devolvía un solo número e informó de 1.782 correcciones. Un
+reporte que dice que se corrigieron 1.782 filas cuando cambiaron 30 manda a investigar un
+incidente que no existe, y a la tercera vez nadie lo mira.
+
+#### La auditoría encontró sola el final de los datos
+
+El backfill llegó al 2017-08-20 y ese run **falló**. No es un defecto: los datos públicos de
+Kaggle terminan el 2017-08-15, así que las ventas acumulaban cinco días de retraso sobre una
+tolerancia de cuatro.
+
+```
+2017-08-19   sales   hueco      2017-08-15   retraso 4   (tolerado 4)  -> verde
+2017-08-20   sales   atrasado   2017-08-15   retraso 5   (tolerado 4)  -> ROJO
+```
+
+Es la tarea haciendo su trabajo: a partir de ahí, seguir emitiendo pedidos habría sido calcular
+sobre un almacén que dejó de alimentarse. La ventana de operación con datos completos es
+2017-07-18 → 2017-08-19.
+
+#### El lazo cerrado: qué pasó con el pedido del 17 de julio
+
+Siete días después, el horizonte completo de la primera emisión ya se había realizado:
+
+```
+2017-07-17   100.0% realizado   costo 95.68 vs 113.12 validado   cobertura 76.6% (la politica pide 76%)
+sin alertas
+```
+
+Las dos cifras que importan:
+
+- **Costo realizado 95,68 frente a 113,12 de validación.** El modelo operó un 15 % *mejor* que en
+  los pliegues. Conviene no celebrarlo: una semana no demuestra nada, y la métrica no está ahí
+  para declarar mejoras sino para detectar degradación sostenida. Lo que sí demuestra es que el
+  número de validación no estaba inflado.
+- **Cobertura efectiva 76,6 % contra el 76 % que pide la política.** Los cuantiles están
+  calibrados en operación, no sólo en validación. Esta es la cifra que delataría un pedido que se
+  queda corto aunque el error medio se viera bien.
+
+El desglose por familia muestra por qué el detalle se guarda aparte del total:
+
+| familia | cuantil que usa | cobertura lograda | costo realizado |
+|---|---|---|---|
+| PRODUCE | 0,50 | 50,8 % | 685,52 |
+| BEVERAGES | 0,90 | 86,0 % | 629,36 |
+| GROCERY I | 0,90 | 86,5 % | 429,84 |
+| DAIRY | 0,50 | 62,2 % | 220,51 |
+| CLEANING | 0,90 | 89,7 % | 197,74 |
+
+PRODUCE cubre el 50 % **a propósito**: es perecedero, su merma es cara y el cuantil crítico que
+sale de sus costos es 0,5. Un reporte que midiera todo contra el 90 % lo marcaría como un
+problema cuando es la política funcionando.
+
+#### El reentrenamiento mensual decidió solo
+
+El DAG `reentrenamiento` corrió para el 2017-08-01: construyó el panel, hizo competir a los tres
+modelos con los mismos pliegues y escribió su decisión en `reportes/asof=2017-08-01/`.
+
+| modelo | costo | pinball | RMSLE | cobertura 0,9 | decisión |
+|---|---|---|---|---|---|
+| `lgbm_cuantilico` | **105,89** | 20,17 | 0,401 | 0,900 | PROMOVER |
+| `baseline_estacional` | 126,35 | 24,16 | 0,547 | 0,863 | — (vigente) |
+| `lineal_cuantilico` | 142,95 | 27,49 | 0,429 | 0,916 | MANTENER |
+
+El lgbm gana en **los tres pliegues** (+19,3 %, +13,0 %, +15,5 %), que es lo que exige
+`en_todos_los_pliegues: true`. El lineal pierde en los tres (−10,9 %, −24,3 %, −4,7 %) **pese a
+tener mejor RMSLE que el baseline** (0,429 contra 0,547): la demostración de por qué el criterio
+mide costo y no error estadístico, esta vez tomada por el orquestador y no a mano.
+
+Nadie eligió el modelo: lo eligió el criterio escrito en `config/model.yaml`. La tarea `validar`
+dejó la decisión en `promocion.json` y la tarea `modelo` obedeció ese archivo.
+
+#### Cinco emisiones, dos modelos, y el baremo correcto para cada una
+
+El backfill emitió los cinco lunes de la ventana. Qué modelo atendió cada emisión, según el
+`emision.json` que escribió cada run:
+
+| emisión | modelo que la atendió | origen |
+|---|---|---|
+| 2017-07-17 | `lgbm_cuantilico` de **2017-07-17** | 2017-07-16 |
+| 2017-07-24 | `lgbm_cuantilico` de **2017-07-17** | 2017-07-23 |
+| 2017-07-31 | `lgbm_cuantilico` de **2017-07-17** | 2017-07-30 |
+| 2017-08-07 | `lgbm_cuantilico` de **2017-08-01** | 2017-08-06 |
+| 2017-08-14 | `lgbm_cuantilico` de **2017-08-01** | 2017-08-13 |
+
+Es la regla del modelo vigente funcionando: el cambio ocurre exactamente en la fecha del
+reentrenamiento, **aunque los cinco runs se ejecutaran el mismo día y con los dos modelos ya en
+el disco**. Cada emisión usó el modelo que existía en su fecha lógica, no el más nuevo.
+
+Y el seguimiento del 2017-08-19 mide cada una contra la promesa del modelo que de verdad la
+produjo:
+
+```
+emision       realizado     costo  validado  cobertura   pide   baremo
+2017-07-17      100.0%      95.68    113.12     76.6%     76%   validado en 2017-07-17
+2017-07-24      100.0%     109.58    113.12     71.8%     76%   validado en 2017-07-17
+2017-07-31      100.0%     118.59    113.12     78.1%     76%   validado en 2017-07-17
+2017-08-07      100.0%     124.85    105.89     81.1%     76%   validado en 2017-08-01
+2017-08-14       28.6%      86.95    105.89     67.5%     76%   validado en 2017-08-01
+```
+
+El baremo cambia solo a partir del 7 de agosto. La última emisión va por el 28,6 % porque sólo
+dos de sus siete días han llegado, y eso es correcto: el resto todavía no se puede calificar.
+
+**El costo sube cuatro semanas seguidas y ninguna alerta se dispara.** De 95,68 a 124,85, un
+30 %, con la peor emisión a +17,9 % sobre una tolerancia del 25 %. Con cuatro puntos no se puede
+distinguir un modelo que se degrada de cuatro semanas que vinieron más difíciles —agosto trae el
+feriado del Primer Grito de Independencia y el efecto de quincena—, y no poder decidirlo es el
+resultado. Lo que sí queda demostrado es un límite del diseño, discutido en
+[`DECISIONES.md` §3.16](DECISIONES.md): una alerta que mira cada emisión por separado no ve una
+tendencia.
+
+#### La reproducibilidad byte a byte es de una plataforma
+
+El backfill regeneró en Linux la misma emisión del 2017-07-17 que `dvc.lock` describe con el hash
+que produjo Windows, y **los hashes no coinciden**. Midiendo la diferencia:
+
+| | windows | linux |
+|---|---|---|
+| un `q0.5` cualquiera | `4.129039181173225` | `4.1290391811732245` |
+
+Diferencia relativa máxima: **3,0 · 10⁻¹⁶**, que es un bit —el épsilon de un `float64` vale
+2,2 · 10⁻¹⁶—. Es el orden en que se suman los flotantes, que depende de cómo reparta el trabajo la
+biblioteca de álgebra. Las dependencias son idénticas: están fijadas desde `uv.lock`.
+
+**Pero el pedido publicado sí es idéntico bit a bit**: las 12.474 cantidades, el total de
+6.351.166,32 unidades y las 8 líneas recortadas. El motivo es `politica.decimales: 2`, puesto
+porque nadie despacha 0,0000000026 unidades, que resulta absorber el ruido de la última cifra.
+
+La precisión que esto obliga a hacer: **la decisión es reproducible entre plataformas; el archivo
+no.** Y como DVC compara hashes de archivos, `dvc repro` en otro sistema operativo dará todas las
+etapas por obsoletas. El detalle está en [`DECISIONES.md` §3.15](DECISIONES.md).
+---
+
 ## Modelado
 
 Tres modelos compiten bajo **validación de origen móvil**, con los mismos pliegues, el mismo
@@ -355,6 +709,7 @@ propio criterio de promoción). El análisis completo está en
 ```
 config/           decisiones de negocio en YAML: costos, horizonte, cuantiles, umbrales
 dags/             orquestación de Airflow — sólo tareas y dependencias, cero lógica
+docker/           imagen y compose de Airflow 3 (LocalExecutor, sin Celery)
 src/reposicion/   el producto
   config.py         rutas y carga de configuración
   contracts.py      contratos de datos (Pandera) por fuente
@@ -367,9 +722,11 @@ src/reposicion/   el producto
   validacion.py     pliegues móviles y criterio de promoción
   policy.py         del pronóstico al pedido (vendedor de periódicos)
   pronostico.py     emisión, con respaldo para series sin historia
-  registro.py       artefactos de modelo con su ficha
+  registro.py       artefactos de modelo con su ficha y el modelo vigente
+  calidad.py        auditoría del almacén: huecos de entrega y correcciones
+  seguimiento.py    desempeño realizado de los pedidos ya publicados
   cli.py            puntos de entrada del pipeline
-tests/            237 pruebas; corren sin Airflow y sin Docker
+tests/            310 pruebas; corren sin Airflow y sin Docker
 tools/            simulador del sistema de origen (NO es parte del producto)
 reportes/         métricas y decisiones de promoción (sí van a Git)
 ```
@@ -394,6 +751,10 @@ Las irrenunciables, que son las que justifican el resto:
 | Que no aparezca `datetime.now()` en el producto | `test_invariantes.py` |
 | Que no haya datos ni modelos versionados en Git | `test_invariantes.py` |
 | Que ninguna etapa de DVC omita el código como dependencia | `test_invariantes.py` |
+| Que ningún DAG importe el producto ni contenga lógica | `test_dags.py` |
+| Que un hueco de entrega no se confunda con una ingesta parada | `test_calidad.py` |
+| Que el seguimiento no rellene con cero lo que aún no ha llegado | `test_seguimiento.py` |
+| Que un backfill no use un modelo entrenado después de su fecha | `test_registro.py` |
 
 ## Documentación
 

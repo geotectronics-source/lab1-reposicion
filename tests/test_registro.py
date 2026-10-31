@@ -126,3 +126,85 @@ def test_entrenar_dos_veces_da_el_mismo_artefacto(clase, tmp_path):
         huellas.append(hashlib.md5((destino / "modelo.pkl").read_bytes()).hexdigest())
 
     assert huellas[0] == huellas[1]
+
+
+# ---------------------------------------------------------------------------
+# El modelo vigente: dos relojes distintos
+# ---------------------------------------------------------------------------
+# La versión del modelo y la fecha de la emisión no coinciden casi nunca: se
+# emite cada lunes y se reentrena una vez al mes. Resolver "cuál opera hoy"
+# mal tiene dos formas, y las dos son caras: exigir la versión de la fecha
+# exacta deja al producto sin emitir seis semanas de cada siete, y tomar
+# simplemente la última hace que un backfill de julio use el modelo de agosto
+# y se califique con información que ese día no existía.
+
+
+def _version(tmp_path, fecha: str, nombre: str = "baseline_estacional"):
+    """Registra un modelo entrenado bajo `models/asof=<fecha>`."""
+    modelo = BaselineEstacional(CUANTILES).entrenar(_panel())
+    registro.guardar(modelo, tmp_path / f"asof={fecha}", {"nombre": nombre, "asof": fecha})
+
+
+def test_vigente_es_la_version_mas_reciente_que_no_mira_al_futuro(tmp_path):
+    for fecha in ("2017-06-01", "2017-07-01", "2017-08-01"):
+        _version(tmp_path, fecha)
+
+    assert registro.version_vigente(tmp_path, "2017-07-17").name == "asof=2017-07-01"
+
+
+def test_la_version_de_la_fecha_exacta_gana_cuando_existe(tmp_path):
+    """Es el caso del pipeline de DVC, que entrena para la fecha que emite.
+
+    Importa que la misma regla cubra las dos situaciones: si hubiera un camino
+    de código para DVC y otro para Airflow, "lo que se reproduce" y "lo que
+    opera" podrían separarse sin que nada avisara.
+    """
+    _version(tmp_path, "2017-07-01")
+    _version(tmp_path, "2017-07-17")
+
+    assert registro.version_vigente(tmp_path, "2017-07-17").name == "asof=2017-07-17"
+
+
+def test_nunca_se_usa_un_modelo_entrenado_despues_de_la_fecha_logica(tmp_path):
+    """Un backfill de julio con un modelo de agosto sería hacer trampa.
+
+    El resultado no fallaría: daría un pronóstico mejor del que el producto
+    habría podido dar ese día, y el backfill mentiría a su favor.
+    """
+    _version(tmp_path, "2017-08-01")
+
+    with pytest.raises(FileNotFoundError, match="futuro"):
+        registro.version_vigente(tmp_path, "2017-07-17")
+
+
+def test_una_carpeta_sin_artefacto_no_cuenta_como_version(tmp_path):
+    """Un entrenamiento que murió a mitad no puede quedar operando.
+
+    La carpeta existe y lleva la fecha más reciente, así que una búsqueda que
+    sólo mire nombres la elegiría y el pronóstico fallaría al cargarla, o peor,
+    cargaría la ficha sin el modelo.
+    """
+    _version(tmp_path, "2017-07-01")
+    (tmp_path / "asof=2017-07-10").mkdir()
+
+    assert registro.version_vigente(tmp_path, "2017-07-17").name == "asof=2017-07-01"
+    assert registro.versiones(tmp_path) == ["2017-07-01"]
+
+
+def test_sin_ninguna_version_el_mensaje_dice_que_hacer(tmp_path):
+    with pytest.raises(FileNotFoundError, match="etapa `modelo`|DAG de reentrenamiento"):
+        registro.version_vigente(tmp_path, "2017-07-17")
+
+
+def test_las_versiones_salen_en_orden_cronologico(tmp_path):
+    """El orden alfabético de las fechas ISO coincide con el cronológico, y de
+    eso depende que `version_vigente` pueda comparar como texto."""
+    for fecha in ("2017-09-01", "2017-07-01", "2017-12-31", "2017-08-15"):
+        _version(tmp_path, fecha)
+
+    assert registro.versiones(tmp_path) == [
+        "2017-07-01",
+        "2017-08-15",
+        "2017-09-01",
+        "2017-12-31",
+    ]

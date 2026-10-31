@@ -27,10 +27,15 @@ import pickle
 from pathlib import Path
 from typing import Any
 
-from reposicion.io import escribir_atomico, escribir_json
+import pandas as pd
+
+from reposicion.io import escribir_atomico, escribir_json, normalizar_fecha
 
 ARCHIVO_MODELO = "modelo.pkl"
 ARCHIVO_FICHA = "metadata.json"
+
+#: Prefijo de las carpetas de versión (`models/asof=2017-08-14`).
+ETIQUETA_VERSION = "asof="
 
 
 def guardar(modelo: Any, destino: Path, ficha: dict) -> Path:
@@ -58,6 +63,67 @@ def cargar(destino: Path) -> Any:
             "de pronosticar."
         )
     return pickle.loads(ruta.read_bytes())
+
+
+def versiones(base: Path) -> list[str]:
+    """Fechas de las versiones completas registradas en `base`, en orden.
+
+    Se exige que exista el `.pkl`: una carpeta a medio escribir —un
+    entrenamiento que murió, o una que DVC acaba de crear vacía— no es una
+    versión y no debe poder quedar operando.
+    """
+    if not base.exists():
+        return []
+    return sorted(
+        carpeta.name.removeprefix(ETIQUETA_VERSION)
+        for carpeta in base.iterdir()
+        if carpeta.is_dir()
+        and carpeta.name.startswith(ETIQUETA_VERSION)
+        and (carpeta / ARCHIVO_MODELO).exists()
+    )
+
+
+def version_vigente(base: Path, asof: str | pd.Timestamp) -> Path:
+    """Carpeta del modelo que opera en `asof`: el más reciente con fecha ≤ `asof`.
+
+    Esta función existe porque **la versión del modelo y la fecha de la
+    emisión son dos relojes distintos**. El pronóstico sale cada lunes y el
+    reentrenamiento corre una vez al mes: la mayoría de los lunes no hay
+    ningún `models/asof=<ese lunes>`, y exigirlo dejaría al producto sin poder
+    emitir seis semanas de cada siete. Lo que opera es el último modelo
+    registrado, igual que en cualquier sistema real.
+
+    **El filtro punto-en-el-tiempo también se aplica al registro de modelos**
+    (INVARIANTE 1). Un backfill de julio que cargara el modelo entrenado en
+    agosto estaría usando información del futuro para decidir el pedido de
+    julio, y el resultado del backfill sería una mentira cómoda: mejor de lo
+    que el producto habría hecho de verdad ese día. Por eso se descartan las
+    versiones posteriores a `asof` en vez de tomar simplemente la última.
+
+    No hay dos caminos de código según quién llame. Cuando el pipeline de DVC
+    acaba de entrenar para `asof`, esa versión *es* la más reciente ≤ `asof` y
+    la regla devuelve exactamente la carpeta que DVC declaró como salida; en
+    operación devuelve la del último reentrenamiento. Una sola regla cubre las
+    dos situaciones, y por eso DVC y Airflow siguen ejecutando lo mismo.
+    """
+    dia = f"{normalizar_fecha(asof):%Y-%m-%d}"
+    # Las fechas ISO ordenan igual como texto que como fecha, así que la
+    # comparación no necesita volver a convertirlas.
+    anteriores = [version for version in versiones(base) if version <= dia]
+    if not anteriores:
+        posteriores = versiones(base)
+        detalle = (
+            f"Las unicas versiones registradas son posteriores: {posteriores}. "
+            "Usar una seria mirar al futuro."
+            if posteriores
+            else "No hay ninguna version registrada."
+        )
+        raise FileNotFoundError(
+            f"No hay modelo vigente en {dia} dentro de {base}. {detalle} "
+            "Ejecuta la etapa `modelo` (o el DAG de reentrenamiento) con una "
+            "fecha logica anterior o igual."
+        )
+    return base / f"{ETIQUETA_VERSION}{anteriores[-1]}"
 
 
 def leer_ficha(destino: Path) -> dict:

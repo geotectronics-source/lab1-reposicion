@@ -152,6 +152,12 @@ stages:
   # Construye el panel del horizonte que arranca en `asof` y lo pronostica. Las
   # series sin historia suficiente las atiende el modelo de referencia, y la
   # columna `modelo` registra quién atendió cada fila.
+  #
+  # La salida es la CARPETA y no sólo el Parquet, porque junto al pronóstico se
+  # escribe `emision.json` con la versión del modelo que lo atendió. En el
+  # pipeline de DVC esa versión coincide con `asof`; en operación puede ser de
+  # hace un mes, y sin ese archivo el seguimiento no podría contestar
+  # "¿empeoró desde que cambiamos de modelo?".
   pronostico:
     cmd: python -m reposicion pronosticar --asof ${asof}
     deps:
@@ -166,7 +172,7 @@ stages:
           - features
           - entrenamiento
     outs:
-      - data/pronosticos/asof=${asof}/pronostico.parquet
+      - data/pronosticos/asof=${asof}
 
   # ---------------------------------------------------------------------------
   # 6. Pedido sugerido

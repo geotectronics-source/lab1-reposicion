@@ -1,0 +1,63 @@
+# =============================================================================
+# Seguimiento del desempeño en operación
+# =============================================================================
+# Cuándo hay que preocuparse por un modelo que ya opera. Son umbrales de
+# negocio, no de modelado: los fija quien asume el costo de un quiebre, así
+# que viven aquí y no en el código.
+#
+# La distinción que gobierna este archivo: **degradarse NO es un error**. Un
+# modelo que empeora porque el negocio cambió es una situación esperada
+# (INVARIANTE 5) y jamás debe hacer fallar el DAG; lo que debe hacer es
+# levantar la mano para que alguien decida reentrenar.
+# =============================================================================
+
+# Cuántas emisiones pasadas se miden en cada corrida. Ocho son dos meses de
+# emisiones semanales: suficiente para ver una tendencia y poco para que la
+# tarea diaria siga durando segundos. No se miden todas desde el principio
+# porque el costo de la tarea crecería sin límite con la antigüedad del
+# producto, y una emisión de hace un año ya no informa ninguna decisión.
+ventana_emisiones: 8
+
+# Por debajo de esta cantidad de líneas evaluadas no se emite alerta. Una
+# emisión cuyo horizonte apenas empieza a realizarse tiene dos o tres días
+# medidos, y un lunes feriado bastaría para disparar una falsa alarma.
+minimo_lineas: 2000
+
+# Cuánto peor que lo validado puede salir el costo real antes de avisar. El
+# 25 % no es simetría estadística: es el margen con el que la diferencia deja
+# de explicarse por que la semana vino distinta. Comparar contra el costo de
+# validación y no contra la emisión anterior es deliberado: lo que interesa
+# es si el modelo cumple la promesa con la que se promovió.
+tolerancia_costo: 0.25
+
+# Desvío admitido en la cobertura del cuantil que usó la política. Si la
+# política pide cubrir el 90 % y en operación cubre el 78 %, el pedido se está
+# quedando corto más seguido de lo que el negocio aceptó, y eso cuesta dinero
+# aunque el error medio se vea bien.
+tolerancia_cobertura: 0.10
+
+# -----------------------------------------------------------------------------
+# Retraso máximo tolerado por fuente, en días
+# -----------------------------------------------------------------------------
+# Separa "hoy no entregaron" (situación de negocio: se sigue con lo último
+# conocido) de "la ingesta no corrió" (fallo). Visto desde fuera los dos casos
+# son iguales —no hay datos nuevos—, y lo único que los distingue es cuánto
+# lleva pasando.
+#
+# Los números salen de la latencia de cada fuente más holgura para fin de
+# semana y feriado. Son expectativas del producto, no la latencia declarada
+# por el origen: el producto no lee la configuración del simulador
+# (INVARIANTE 2). Una fuente que no aparezca en esta lista no se vigila.
+retraso_maximo_dias:
+  # Se cierran de madrugada y llegan al día siguiente. Cuatro días dan margen
+  # para un feriado largo sin dejar pasar una semana muerta.
+  sales: 4
+  # Un día más de latencia que las ventas, por el consolidado del POS central.
+  transactions: 5
+  # Sólo cotiza en días hábiles: de un lunes al viernes anterior ya van tres
+  # días, y un feriado bursátil puede sumar dos más.
+  oil: 6
+  # Catálogo mensual publicado con 60 días de anticipación: su último dato
+  # está en el futuro, así que el retraso es siempre cero. Se vigila de todas
+  # formas para detectar que dejó de publicarse.
+  holidays_events: 40

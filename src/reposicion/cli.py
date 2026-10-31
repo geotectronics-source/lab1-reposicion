@@ -29,9 +29,9 @@ from pathlib import Path
 import pandas as pd
 import typer
 
-from reposicion import features, registro, validacion
+from reposicion import calidad, features, registro, seguimiento, validacion
 from reposicion.config import cargar_config, rutas
-from reposicion.ingesta import FUENTES, ingerir, ingerir_historico
+from reposicion.ingesta import FUENTES, ingerir, ingerir_historico, tiene_carga_inicial
 from reposicion.io import escribir_csv, escribir_json, escribir_parquet, normalizar_fecha
 from reposicion.landing import descubrir_entregas
 from reposicion.models.baseline import BaselineEstacional
@@ -106,11 +106,11 @@ def _hecho(destino: Path, desde: float) -> None:
 @app.command()
 def ingesta(
     asof: str = ASOF,
-    solo_el_dia: bool = typer.Option(
+    incremental: bool = typer.Option(
         False,
-        "--solo-el-dia",
-        help="Ingiere unicamente la llegada de asof, no el historico anterior. "
-        "Es la forma en que lo llamara Airflow una vez al dia.",
+        "--incremental",
+        help="Ingiere solo la llegada de asof, suponiendo que el almacen ya "
+        "refleja los dias anteriores. Es como lo llama Airflow cada dia.",
     ),
 ) -> None:
     """Materializa en el almacén propio todo lo que había llegado en `asof`.
@@ -119,13 +119,30 @@ def ingesta(
     el filtro punto-en-el-tiempo se aplica al leer (`leer_raw_asof`) y no al
     escribir. Borrarlo destruiría el histórico que permite auditar
     (INVARIANTE 4).
+
+    Hay dos modos, uno por orquestador, y los dos dejan el almacén en el mismo
+    estado para una misma fecha:
+
+    - **completo** (por defecto): rehace todo lo llegado hasta `asof`. Es el de
+      DVC, porque una etapa reproducible tiene que ser función de sus entradas
+      y no del orden en que se ejecutó antes.
+    - **incremental** (`--incremental`): añade sólo la partición de `asof`. Es
+      el de Airflow, un run por día, porque reprocesar seis semanas de
+      llegadas cada mañana sería trabajo cuadrático a cambio de nada.
+
+    El modo incremental hace la **carga inicial si falta**. Dejar ese paso
+    fuera obligaría a una orden manual antes del primer run del despliegue, y
+    es justo el paso que nadie recuerda: el almacén quedaría con una semana de
+    llegadas y sin los dos años de historia que necesitan las ventanas.
     """
     dia = normalizar_fecha(asof)
     inicio = time.monotonic()
 
     for fuente in FUENTES:
         resultados = []
-        if solo_el_dia:
+        if incremental:
+            if not tiene_carga_inicial(fuente):
+                resultados.append(ingerir_historico(fuente))
             fechas = [dia]
         else:
             resultados.append(ingerir_historico(fuente))
@@ -148,6 +165,53 @@ def ingesta(
                 )
 
     _hecho(rutas().raw, inicio)
+
+
+# ---------------------------------------------------------------------------
+# 1b. Auditoría del almacén
+# ---------------------------------------------------------------------------
+
+
+@app.command()
+def auditar(asof: str = ASOF) -> None:
+    """Registra el estado de cada fuente y distingue un hueco de un flujo roto.
+
+    Falla **sólo** si alguna fuente acumula más retraso del tolerado o no
+    tiene ni un dato. Que hoy no haya entregado no la hace fallar: eso es
+    negocio (INVARIANTE 5) y queda anotado en `calidad.csv`.
+
+    Es la tarea que convierte una dependencia implícita en una explícita. Sin
+    ella, pronosticar un lunes cuya ingesta nunca corrió daría un pronóstico
+    perfectamente válido calculado sobre datos viejos, y nadie se enteraría.
+    """
+    dia = normalizar_fecha(asof)
+    inicio = time.monotonic()
+
+    reporte = calidad.auditar(dia)
+    columnas = ["fuente", "estado", "ultimo_dato", "retraso_dias", "filas_en_asof"]
+    typer.echo(reporte[columnas].to_string(index=False))
+
+    for fuente in calidad.huecos(reporte):
+        typer.secho(
+            f"  hueco: {fuente} no entrego en {dia:%Y-%m-%d}; se sigue con lo ultimo conocido",
+            fg=typer.colors.YELLOW,
+        )
+    for _, fila in reporte.loc[reporte["reenviadas_en_asof"] > 0].iterrows():
+        typer.secho(
+            f"  {fila['fuente']} reenvio {fila['reenviadas_en_asof']:,} fila(s) ya "
+            f"conocidas, de las que {fila['correcciones_en_asof']:,} cambian de valor",
+            fg=typer.colors.CYAN,
+        )
+
+    destino = escribir_csv(reporte, calidad.ruta_reporte(dia))
+    _hecho(destino, inicio)
+
+    if rotas := calidad.atrasadas(reporte):
+        raise typer.BadParameter(
+            f"Fuentes con retraso inadmisible en {dia:%Y-%m-%d}: {rotas}. "
+            "Esto no es un hueco de entrega: la ingesta de esos dias no corrio. "
+            "Ejecuta el DAG `ingesta_fuentes` para las fechas que faltan."
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -306,7 +370,15 @@ def modelo(asof: str = ASOF) -> None:
 
 @app.command()
 def pronosticar(asof: str = ASOF) -> None:
-    """Emite el pronóstico cuantílico del horizonte que arranca en `asof`."""
+    """Emite el pronóstico cuantílico del horizonte que arranca en `asof`.
+
+    Usa el **modelo vigente**: el último registrado con fecha ≤ `asof`, no uno
+    entrenado para `asof`. El pronóstico sale cada semana y el reentrenamiento
+    corre una vez al mes, así que exigir un modelo de la misma fecha dejaría al
+    producto sin poder emitir casi ningún lunes. Qué versión atendió la emisión
+    queda escrito en `emision.json`, que es lo que después permite al
+    seguimiento preguntar "¿empeoró desde que cambiamos de modelo?".
+    """
     dia = normalizar_fecha(asof)
     inicio = time.monotonic()
     cfg = cargar_config("model")
@@ -317,12 +389,30 @@ def pronosticar(asof: str = ASOF) -> None:
             f"No hay datos para pronosticar en asof={dia:%Y-%m-%d}: el almacen esta vacio."
         )
 
-    emitido = emitir(futuro, registro.cargar(_carpeta(rutas().modelos, dia)), dia, config=cfg)
+    version = registro.version_vigente(rutas().modelos, dia)
+    ficha = registro.leer_ficha(version)
+    emitido = emitir(futuro, registro.cargar(version), dia, config=cfg)
+    respaldo = cobertura_del_respaldo(emitido)
 
-    typer.echo(f"{len(emitido):,} filas  ·  origen {emitido['origen'].max():%Y-%m-%d}")
-    typer.echo(cobertura_del_respaldo(emitido).to_string(index=False))
+    typer.echo(
+        f"{len(emitido):,} filas  ·  origen {emitido['origen'].max():%Y-%m-%d}  ·  "
+        f"modelo {ficha['nombre']} de {ficha['asof']}"
+    )
+    typer.echo(respaldo.to_string(index=False))
 
-    destino = escribir_parquet(emitido, _carpeta(rutas().pronosticos, dia) / ARCHIVO_PRONOSTICO)
+    salida = _carpeta(rutas().pronosticos, dia)
+    escribir_parquet(emitido, salida / ARCHIVO_PRONOSTICO)
+    destino = escribir_json(
+        {
+            "asof": f"{dia:%Y-%m-%d}",
+            "modelo": ficha["nombre"],
+            "modelo_asof": ficha["asof"],
+            "origen": f"{emitido['origen'].max():%Y-%m-%d}",
+            "filas": int(len(emitido)),
+            "cobertura": respaldo.to_dict(orient="records"),
+        },
+        salida / seguimiento.ARCHIVO_EMISION,
+    )
     _hecho(destino, inicio)
 
 
@@ -360,6 +450,55 @@ def pedir(asof: str = ASOF) -> None:
     escribir_parquet(pedido, salida / "pedido.parquet")
     escribir_csv(resumen, salida / "pedido_semana.csv")
     destino = escribir_csv(explicacion, salida / "explicacion.csv")
+    _hecho(destino, inicio)
+
+
+# ---------------------------------------------------------------------------
+# 7. Seguimiento del desempeño
+# ---------------------------------------------------------------------------
+
+
+@app.command()
+def seguir(asof: str = ASOF) -> None:
+    """Mide qué pasó de verdad con los pedidos ya publicados.
+
+    **Esta orden no falla por un modelo que se degrada.** Un desempeño peor
+    que el validado es una situación de negocio, no un dato inválido
+    (INVARIANTE 5): hacer caer el DAG por eso dejaría al día siguiente sin
+    medición, que es justo cuando hace falta. La alerta queda en el log y en
+    `desempeno.json`, y la decisión de reentrenar es de una persona.
+
+    Lo único que la hace fallar es que el almacén no se pueda leer, es decir,
+    un problema de verdad.
+    """
+    dia = normalizar_fecha(asof)
+    inicio = time.monotonic()
+
+    detalle, resumen = seguimiento.medir(dia)
+
+    for fila in resumen["emisiones"]:
+        if not fila["lineas"]:
+            typer.echo(f"{fila['emision']}   {fila['estado']}")
+            continue
+        validado = f"{fila['costo_validado']:8.2f}" if fila["costo_validado"] else "       -"
+        typer.echo(
+            f"{fila['emision']}   {fila['realizado']:>6.1%} realizado   "
+            f"costo {fila['costo_realizado']:8.2f} vs {validado} validado   "
+            f"cobertura {fila['cobertura_usada']:>6.1%} (la politica pide "
+            f"{fila['cuantil_usado']:.0%})"
+        )
+
+    for aviso in resumen["alertas"]:
+        typer.secho(f"  ALERTA  {aviso}", fg=typer.colors.YELLOW, bold=True)
+    if resumen["emisiones"] and not resumen["alertas"]:
+        typer.secho("sin alertas", fg=typer.colors.GREEN)
+    if nota := resumen.get("nota"):
+        typer.echo(nota)
+
+    salida = _carpeta(rutas().seguimiento, dia)
+    if not detalle.empty:
+        escribir_csv(detalle, salida / "desempeno.csv")
+    destino = escribir_json(resumen, salida / "desempeno.json")
     _hecho(destino, inicio)
 
 
