@@ -790,7 +790,7 @@ Las irrenunciables, que son las que justifican el resto:
 
 | # | Requerimiento | Dónde |
 |---|---|---|
-| 1 | Repositorio con ramas y Pull Requests, `main` protegida | 8 PRs, uno por fase; `main` exige PR, historial lineal y los dos checks |
+| 1 | Repositorio con ramas y Pull Requests, `main` protegida | un PR por fase, ninguno directo a `main`, que exige PR, historial lineal y los dos checks |
 | 1 | `pytest` en GitHub Actions | [`.github/workflows/`](.github/workflows) — matriz Ubuntu + Windows |
 | 1 | `CLAUDE.md` con las reglas del proyecto | [`CLAUDE.md`](CLAUDE.md) |
 | 2 | Ni datos ni modelos en Git | `git ls-files -- data landing models` devuelve sólo `data/kaggle.dvc`; hay prueba que lo vigila |
