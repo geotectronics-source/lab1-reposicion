@@ -88,6 +88,20 @@ class Rutas:
         return self.data / "cuarentena"
 
     @property
+    def reportes(self) -> Path:
+        """Métricas y decisiones de promoción. **Esto SÍ va a Git.**
+
+        Es la excepción deliberada a "nada de salidas en el repositorio", y no
+        contradice el requerimiento: no son datos ni modelos, son unos cuantos
+        kilobytes de JSON que dicen qué modelo se promovió y por qué. Tenerlos
+        versionados hace que el historial de Git conteste "¿con qué métricas
+        se tomó esa decisión?" sin necesidad de descargar la caché de DVC, y
+        hace que el cambio de métricas aparezca en el diff de un Pull Request,
+        que es donde se revisa.
+        """
+        return self.raiz / "reportes"
+
+    @property
     def modelos(self) -> Path:
         return self.raiz / "models"
 

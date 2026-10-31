@@ -1,0 +1,28 @@
+# =============================================================================
+# Fecha lógica del pipeline
+# =============================================================================
+# Este archivo tiene un solo valor, y es el que convierte al repositorio en un
+# registro auditable de pronósticos.
+#
+# `asof` es la fecha en nombre de la cual corre el pipeline: la emisión que se
+# materializa. Todo lo que el producto lee se filtra por ella (INVARIANTE 1),
+# así que fijarla aquí —en un archivo versionado, no en la línea de comando—
+# significa que **el commit describe un pronóstico concreto**.
+#
+# Reproducir el pronóstico de una fecha pasada es, por tanto, volver al commit
+# en que este valor era esa fecha:
+#
+#     git checkout pronostico-2017-07-17
+#     uv run dvc checkout          # recupera las salidas desde la caché
+#     uv run dvc repro --force     # o las recalcula desde cero
+#
+# La alternativa descartada era pasar la fecha como argumento
+# (`dvc repro -- --asof 2017-07-17`). No sirve: DVC no vería el cambio, daría
+# el pipeline por actualizado y `dvc.lock` quedaría describiendo una fecha
+# distinta de la que produjo las salidas. Un lock que miente es peor que no
+# tener lock.
+# =============================================================================
+
+# Emisión vigente. En operación, Airflow pasa su `logical_date` y este valor
+# no se usa; es el orquestador de reproducibilidad el que lo necesita.
+asof: "2017-07-17"

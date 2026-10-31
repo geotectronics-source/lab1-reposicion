@@ -1,0 +1,191 @@
+# =============================================================================
+# Pipeline de datos
+# =============================================================================
+# Cada etapa declara de qué depende y qué produce. Con eso DVC puede hacer dos
+# cosas que Git no puede:
+#
+#   1. Reejecutar sólo lo que quedó obsoleto (`dvc repro`).
+#   2. Registrar en `dvc.lock` el hash de cada entrada y cada salida, de modo
+#      que un commit no describe sólo el código sino **el resultado**.
+#
+# -----------------------------------------------------------------------------
+# Dos decisiones de diseño que conviene poder defender
+# -----------------------------------------------------------------------------
+#
+# **Las etapas invocan la misma orden que invocará Airflow.** `python -m
+# reposicion <etapa>` es la única frontera entre orquestación y producto. Si
+# DVC llamara a un script propio, "lo que reproduce DVC" y "lo que corre en
+# producción" serían dos cosas distintas y la reproducibilidad sería
+# decorativa.
+#
+# **Cada etapa depende de `src/reposicion` entero, no de los módulos que usa.**
+# Es deliberadamente grueso: tocar `policy.py` invalida también el
+# entrenamiento, que no lo necesita. La alternativa —listar módulo por módulo—
+# es más fina y más rápida, pero basta olvidar un `import` nuevo para que DVC
+# dé por actualizada una salida que ya no corresponde al código. Un lock que
+# miente anula el motivo de usar DVC, así que se paga el recálculo.
+#
+# Nota: esto NO afecta a la demostración del requerimiento 2, porque cambiar un
+# costo no toca el código. Lo que el grafo sí revela es que un costo tiene DOS
+# efectos y no uno: cambia el pedido (etapa `pedido`, décimas de segundo) y
+# puede cambiar qué modelo se promueve (etapa `validacion`, porque la métrica
+# de promoción ES el costo de negocio). `dvc status` nombra las dos.
+# =============================================================================
+
+# `vars` expone las claves de este archivo como `${...}` en las rutas y las
+# órdenes de abajo. La fecha lógica aparece así literalmente en `dvc.lock`.
+vars:
+  - config/pipeline.yaml
+
+stages:
+  # ---------------------------------------------------------------------------
+  # 0. Simulador del sistema de origen — NO ES PARTE DEL PRODUCTO
+  # ---------------------------------------------------------------------------
+  # Única etapa autorizada a escribir en `landing/` (INVARIANTE 2). Existe para
+  # que la cadena sea reproducible de punta a punta desde los CSV públicos de
+  # Kaggle: sin ella, la bandeja sería un regalo sin procedencia y nadie
+  # podría comprobar que las latencias y los incidentes son los declarados.
+  bandeja:
+    cmd: python tools/build_landing.py --limpiar
+    deps:
+      - data/kaggle
+      - tools/build_landing.py
+    params:
+      - config/sources.yaml:
+          - origen
+          - fuentes
+          - incidentes
+    outs:
+      - landing
+
+  # ---------------------------------------------------------------------------
+  # 1. Ingesta validada
+  # ---------------------------------------------------------------------------
+  # Lee la bandeja hasta `asof` y materializa el almacén propio en Parquet. Lo
+  # que no cumple su contrato va a cuarentena y la etapa falla; una fuente que
+  # no llegó es una situación de negocio y no falla (INVARIANTE 5).
+  ingesta:
+    cmd: python -m reposicion ingesta --asof ${asof}
+    deps:
+      - landing
+      - src/reposicion
+    params:
+      - config/pipeline.yaml:
+          - asof
+    outs:
+      - data/raw
+
+  # ---------------------------------------------------------------------------
+  # 2. Panel de entrenamiento
+  # ---------------------------------------------------------------------------
+  # La etapa cara: reconstruye el estado de la información en cada origen
+  # histórico para generar ejemplos sin fuga temporal. Se materializa aparte
+  # precisamente para no repetirla cada vez que se compara un modelo.
+  panel:
+    cmd: python -m reposicion panel --asof ${asof}
+    deps:
+      - data/raw
+      - src/reposicion
+    params:
+      - config/pipeline.yaml:
+          - asof
+      - config/model.yaml:
+          - features
+          - entrenamiento
+          - pronostico
+    outs:
+      - data/procesado/asof=${asof}/entrenamiento.parquet
+
+  # ---------------------------------------------------------------------------
+  # 3. Validación temporal y promoción
+  # ---------------------------------------------------------------------------
+  # Los tres modelos compiten con los mismos pliegues y el mismo panel. Decide
+  # el costo de negocio, así que `costs.yaml` entra como parámetro: cambiarlo
+  # puede cambiar qué modelo se promueve, y eso tiene que quedar registrado.
+  validacion:
+    cmd: python -m reposicion validar --asof ${asof}
+    deps:
+      - data/procesado/asof=${asof}/entrenamiento.parquet
+      - src/reposicion
+    params:
+      - config/pipeline.yaml:
+          - asof
+      - config/model.yaml:
+          - promocion
+          - validacion
+          - pronostico
+      - config/costs.yaml:
+          - defaults
+          - familias
+    outs:
+      - data/seguimiento/asof=${asof}/validacion.csv
+      # `cache: false` deja estos dos en Git en vez de en la caché de DVC. Son
+      # kilobytes de JSON y son la respuesta a "¿por qué opera este modelo?":
+      # tenerlos versionados hace que la decisión aparezca en el diff del PR.
+      - reportes/asof=${asof}/promocion.json:
+          cache: false
+    metrics:
+      - reportes/asof=${asof}/metricas.json:
+          cache: false
+
+  # ---------------------------------------------------------------------------
+  # 4. Modelo promovido
+  # ---------------------------------------------------------------------------
+  # Ajusta sobre el panel COMPLETO el modelo que ganó la validación. Depende de
+  # `promocion.json` y no de la configuración: quién opera lo decidió el
+  # criterio versionado, no quien lanza el pipeline.
+  modelo:
+    cmd: python -m reposicion modelo --asof ${asof}
+    deps:
+      - data/procesado/asof=${asof}/entrenamiento.parquet
+      - reportes/asof=${asof}/promocion.json
+      - src/reposicion
+    params:
+      - config/pipeline.yaml:
+          - asof
+    outs:
+      - models/asof=${asof}
+
+  # ---------------------------------------------------------------------------
+  # 5. Pronóstico cuantílico
+  # ---------------------------------------------------------------------------
+  # Construye el panel del horizonte que arranca en `asof` y lo pronostica. Las
+  # series sin historia suficiente las atiende el modelo de referencia, y la
+  # columna `modelo` registra quién atendió cada fila.
+  pronostico:
+    cmd: python -m reposicion pronosticar --asof ${asof}
+    deps:
+      - data/raw
+      - models/asof=${asof}
+      - src/reposicion
+    params:
+      - config/pipeline.yaml:
+          - asof
+      - config/model.yaml:
+          - pronostico
+          - features
+          - entrenamiento
+    outs:
+      - data/pronosticos/asof=${asof}/pronostico.parquet
+
+  # ---------------------------------------------------------------------------
+  # 6. Pedido sugerido
+  # ---------------------------------------------------------------------------
+  # La etapa que demuestra el requerimiento 2. NO depende del modelo ni del
+  # panel: sólo del pronóstico ya emitido y de los costos. Por eso
+  # `dvc repro -s pedido` recalcula el pedido en décimas de segundo tras
+  # cambiar un costo, sin tocar el modelo.
+  pedido:
+    cmd: python -m reposicion pedir --asof ${asof}
+    deps:
+      - data/pronosticos/asof=${asof}/pronostico.parquet
+      - src/reposicion
+    params:
+      - config/pipeline.yaml:
+          - asof
+      - config/costs.yaml:
+          - defaults
+          - familias
+          - politica
+    outs:
+      - data/pedidos/asof=${asof}

@@ -12,6 +12,7 @@ import subprocess
 from pathlib import Path
 
 import pytest
+import yaml
 
 RAIZ = Path(__file__).resolve().parents[1]
 
@@ -169,3 +170,92 @@ def test_el_producto_no_usa_rutas_absolutas():
         f"Ruta absoluta en el código del producto: {infractores}. "
         "Resuelve las rutas desde la configuración o el entorno."
     )
+
+
+# ---------------------------------------------------------------------------
+# Requerimiento 2 del laboratorio — ni datos ni modelos en Git
+# ---------------------------------------------------------------------------
+
+#: Lo único que estas carpetas pueden aportar al repositorio: los punteros de
+#: DVC y los `.gitignore` que DVC genera. Todo lo demás son datos o modelos.
+RASTREABLES_EN_ZONAS_DE_DATOS = (".dvc", ".gitignore")
+
+ZONAS_DE_DATOS = ("data", "landing", "models", "docker/logs")
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="requiere git")
+def test_no_hay_datos_ni_modelos_en_el_repositorio():
+    """El enunciado lo exige y es fácil romperlo sin darse cuenta.
+
+    Basta un `git add -A` antes de que DVC haya registrado una salida nueva
+    para meter 118 MB de CSV en el historial, y una vez dentro no se van: hay
+    que reescribir el historial de una rama protegida. La prueba es la red
+    que hace que el error se detecte en el primer `pytest` y no en el PR.
+
+    Se mira lo que Git **rastrea**, no lo que hay en disco. Que los archivos
+    existan en la máquina de desarrollo es lo normal; lo que no puede pasar es
+    que estén versionados.
+    """
+    resultado = subprocess.run(
+        ["git", "ls-files", "--", *ZONAS_DE_DATOS],
+        cwd=RAIZ,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if resultado.returncode != 0:
+        pytest.skip("el directorio no es un repositorio git")
+
+    intrusos = [
+        linea
+        for linea in resultado.stdout.splitlines()
+        if linea and not linea.endswith(RASTREABLES_EN_ZONAS_DE_DATOS)
+    ]
+    assert not intrusos, (
+        f"Hay datos o modelos versionados en Git: {intrusos}. "
+        "Se versionan con DVC: `dvc add` o como salida de una etapa de dvc.yaml."
+    )
+
+
+# ---------------------------------------------------------------------------
+# El lock de DVC no puede mentir
+# ---------------------------------------------------------------------------
+
+
+def test_toda_etapa_del_pipeline_depende_del_codigo_del_producto():
+    """Una etapa que no declara el código como dependencia produce un lock falso.
+
+    DVC daría la salida por actualizada después de cambiar una función, y el
+    hash registrado describiría un artefacto que ya no corresponde al código
+    que dice haberlo producido. Eso anula el motivo de usar DVC, así que la
+    dependencia gruesa sobre `src/reposicion` es obligatoria y se comprueba.
+
+    La etapa del simulador queda fuera a propósito: no ejecuta el producto
+    sino `tools/build_landing.py`, que declara por separado.
+    """
+    pipeline = yaml.safe_load((RAIZ / "dvc.yaml").read_text(encoding="utf-8"))
+    sin_codigo = [
+        nombre
+        for nombre, etapa in pipeline["stages"].items()
+        if "reposicion" in etapa["cmd"] and "src/reposicion" not in (etapa.get("deps") or [])
+    ]
+    assert not sin_codigo, (
+        f"Etapas que ejecutan el producto sin declararlo como dependencia: {sin_codigo}. "
+        "Añade `src/reposicion` a sus `deps` o el lock dejará de decir la verdad."
+    )
+
+
+def test_ninguna_etapa_consulta_la_fecha_del_sistema():
+    """Toda orden del pipeline recibe `--asof` de forma explícita.
+
+    Si una etapa lo omitiera, tomaría la fecha por defecto —si existiera— y
+    `dvc repro` sobre un commit antiguo produciría el pronóstico de hoy con el
+    código de entonces: lo peor de los dos mundos.
+    """
+    pipeline = yaml.safe_load((RAIZ / "dvc.yaml").read_text(encoding="utf-8"))
+    sin_fecha = [
+        nombre
+        for nombre, etapa in pipeline["stages"].items()
+        if "reposicion" in etapa["cmd"] and "--asof" not in etapa["cmd"]
+    ]
+    assert not sin_fecha, f"Etapas sin fecha logica explicita: {sin_fecha}."

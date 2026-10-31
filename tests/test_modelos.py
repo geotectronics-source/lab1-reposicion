@@ -13,6 +13,7 @@ from reposicion.models.lineal import RegresionCuantilicaLineal
 from reposicion.validacion import (
     Pliegue,
     decidir_promocion,
+    elegir_campeon,
     partir,
     pliegues_moviles,
     resumir,
@@ -370,3 +371,68 @@ def test_resumir_promedia_sobre_los_pliegues():
     costos = resumen.set_index("modelo")["costo_negocio"]
     assert costos["vigente"] == pytest.approx(150.0)
     assert costos["retador"] == pytest.approx(100.0)
+
+
+# ---------------------------------------------------------------------------
+# Con más de un retador: quién pasa a producción
+# ---------------------------------------------------------------------------
+
+CFG_CAMPEON = {
+    "promocion": {
+        **CFG_PROMOCION["promocion"],
+        "vigente": "baseline",
+        "retadores": ["uno", "dos"],
+    }
+}
+
+
+def _tres(baseline: list[float], uno: list[float], dos: list[float]) -> pd.DataFrame:
+    filas = []
+    for i, costos in enumerate(zip(baseline, uno, dos, strict=True), 1):
+        for modelo, costo in zip(("baseline", "uno", "dos"), costos, strict=True):
+            filas.append({"modelo": modelo, "pliegue": i, "costo_negocio": costo})
+    return pd.DataFrame(filas)
+
+
+def test_entre_los_que_pasan_gana_el_mas_barato():
+    campeon, decisiones = elegir_campeon(
+        _tres([100, 100], [80, 80], [70, 70]), config=CFG_CAMPEON
+    )
+    assert campeon == "dos"
+    assert all(d.promover for d in decisiones.values())
+
+
+def test_el_mejor_promedio_no_siempre_se_promueve():
+    """La prueba que justifica el orden de los dos filtros.
+
+    `uno` tiene el mejor costo medio (70 contra 85) pero empeora al vigente en
+    el segundo pliegue. Comparar primero a los retadores entre sí lo habría
+    coronado; exigir primero que cada uno le gane al vigente lo descarta y
+    promueve a `dos`, que es peor en promedio y estable.
+    """
+    resultados = _tres([100, 100], [30, 110], [85, 85])
+    medias = resumir(resultados).set_index("modelo")["costo_negocio"]
+    assert medias["uno"] < medias["dos"]  # el mejor promedio es `uno`
+
+    campeon, decisiones = elegir_campeon(resultados, config=CFG_CAMPEON)
+    assert campeon == "dos"
+    assert not decisiones["uno"].promover
+
+
+def test_si_ninguno_pasa_sigue_operando_el_vigente():
+    """Ante la duda no se cambia nada: es la opción con menos riesgo y la que
+    deja el producto en el estado que ya se sabe que funciona."""
+    campeon, decisiones = elegir_campeon(_tres([100, 100], [99, 99], [98, 150]), config=CFG_CAMPEON)
+    assert campeon == "baseline"
+    assert not any(d.promover for d in decisiones.values())
+
+
+def test_un_retador_sin_resultados_se_ignora_sin_romper():
+    """Si un modelo no llegó a evaluarse —porque falló su entrenamiento, por
+    ejemplo— la decisión se toma con los que sí hay. Quedarse sin promover
+    nada por una ausencia sería peor."""
+    cfg = {"promocion": {**CFG_CAMPEON["promocion"], "retadores": ["uno", "fantasma"]}}
+    campeon, decisiones = elegir_campeon(_tres([100, 100], [80, 80], [70, 70]), config=cfg)
+
+    assert campeon == "uno"
+    assert "fantasma" not in decisiones

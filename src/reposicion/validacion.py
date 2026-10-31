@@ -168,3 +168,40 @@ def decidir_promocion(
         razon = f"la mejora mínima observada ({peor:+.1%}) no alcanza el umbral de {umbral:.0%}"
 
     return Decision(promover=gana, razon=razon, mejoras=mejoras)
+
+
+def elegir_campeon(
+    resultados: pd.DataFrame,
+    *,
+    config: dict | None = None,
+) -> tuple[str, dict[str, Decision]]:
+    """Qué modelo pasa a producción, decidido con el criterio versionado.
+
+    Hay más de un retador, así que el criterio se aplica dos veces y en este
+    orden:
+
+    1. Cada retador tiene que **ganarle al vigente** según `decidir_promocion`.
+       Un retador que no supera el umbral queda fuera aunque sea el mejor de
+       los retadores: el vigente no se cambia por algo que no demostró ser
+       mejor.
+    2. Entre los que pasan, se promueve el de **menor costo medio**.
+
+    El orden no es intercambiable. Comparar primero a los retadores entre sí
+    y luego al ganador contra el vigente permitiría promover un modelo que
+    gana por poco al vigente sólo porque otro retador era peor todavía.
+
+    Devuelve el nombre del modelo promovido y la decisión frente al vigente de
+    cada retador, para que el pipeline la registre entera: saber *por qué no*
+    se promovió un modelo vale tanto como saber por qué sí.
+    """
+    cfg = (config or cargar_config("model"))["promocion"]
+    vigente = cfg["vigente"]
+    retadores = [r for r in cfg["retadores"] if r in set(resultados["modelo"])]
+
+    decisiones = {r: decidir_promocion(resultados, vigente, r, config=config) for r in retadores}
+    medias = resumir(resultados).set_index("modelo")[cfg["metrica"]]
+
+    promovibles = [r for r, d in decisiones.items() if d.promover]
+    campeon = min(promovibles, key=lambda r: medias[r]) if promovibles else vigente
+
+    return campeon, decisiones
