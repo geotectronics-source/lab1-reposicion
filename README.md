@@ -514,8 +514,13 @@ la tarea dejaría al día siguiente sin medición, que es justo cuando hace falt
 
 ### El backfill, corrido de verdad
 
-No es una captura de pantalla de la interfaz: son las corridas que produjeron los archivos que
-están en `data/`.
+Las corridas que produjeron los archivos que están en `data/`. Las capturas de la interfaz
+están en [`docs/evidencia/`](docs/evidencia/), con un índice de qué prueba cada una, y junto a
+ellas los reportes que esas corridas escribieron.
+
+La captura documenta; **el artefacto demuestra**. Una pantalla verde dice que la tarea terminó
+sin error, y eso es compatible con que haya escrito cualquier cosa. Lo que sigue son los números
+que salieron de los archivos, leídos después.
 
 ```bash
 airflow backfill create --dag-id ingesta_fuentes --from-date 2017-07-18 --to-date 2017-08-20
@@ -741,6 +746,7 @@ propio criterio de promoción). El análisis completo está en
 config/           decisiones de negocio en YAML: costos, horizonte, cuantiles, umbrales
 dags/             orquestación de Airflow — sólo tareas y dependencias, cero lógica
 docker/           imagen y compose de Airflow 3 (LocalExecutor, sin Celery)
+docs/evidencia/   capturas de la interfaz y los reportes de las corridas reales
 src/reposicion/   el producto
   config.py         rutas y carga de configuración
   contracts.py      contratos de datos (Pandera) por fuente
@@ -811,6 +817,9 @@ Las irrenunciables, que son las que justifican el resto:
 | 4 | Métricas técnicas **y** de negocio | pinball, MAE, RMSLE, cobertura **y** costo de negocio, juntas en `reportes/` |
 | 4 | Criterio de promoción explícito | `promocion` en [`config/model.yaml`](config/model.yaml): costo, mejora mínima del 3 %, en todos los pliegues |
 | 5 | README y DECISIONES | este archivo y [`DECISIONES.md`](DECISIONES.md) |
+| 5 | Evidencia: ejecuciones en la interfaz de Airflow | [`docs/evidencia/`](docs/evidencia/) — nueve capturas del despliegue real, con lo que prueba cada una |
+| 5 | Evidencia: comparación de modelos | [`reportes/`](reportes) — tres paneles con `metricas.json` y `promocion.json`, y la [decisión tal como la imprime la tarea](docs/evidencia/09-validacion-tres-pliegues-y-promocion.jpg) |
+| 5 | Evidencia: reporte de seguimiento del desempeño | [`docs/evidencia/desempeno-2017-08-19.json`](docs/evidencia/desempeno-2017-08-19.json) y su detalle por familia en CSV |
 
 ## Documentación
 
