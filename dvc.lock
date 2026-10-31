@@ -1,0 +1,363 @@
+schema: '2.0'
+stages:
+  bandeja:
+    cmd: python tools/build_landing.py --limpiar
+    deps:
+    - path: data/kaggle
+      hash: md5
+      md5: bdc16ae394251e429e0116e457456a39.dir
+      size: 123397286
+      nfiles: 5
+    - path: tools/build_landing.py
+      hash: md5
+      md5: b4b87bbea75fb14b453d1a6fd06924f2
+      size: 12614
+    params:
+      config/sources.yaml:
+        fuentes:
+          sales:
+            archivo: train.csv
+            tipo: hecho_diario
+            latencia_dias: 1
+            clave:
+            - date
+            - store_nbr
+            - family
+          transactions:
+            archivo: transactions.csv
+            tipo: hecho_diario
+            latencia_dias: 2
+            clave:
+            - date
+            - store_nbr
+          oil:
+            archivo: oil.csv
+            tipo: hecho_diario
+            latencia_dias: 1
+            clave:
+            - date
+          holidays_events:
+            archivo: holidays_events.csv
+            tipo: catalogo
+            cadencia_dias: 30
+            anticipacion_dias: 60
+            clave:
+            - date
+            - type
+            - locale
+            - locale_name
+            - description
+          stores:
+            archivo: stores.csv
+            tipo: catalogo_estatico
+            clave:
+            - store_nbr
+        incidentes:
+        - tipo: correccion_retroactiva
+          fuente: sales
+          fecha_datos: '2017-07-05'
+          corregido_en: '2017-07-20'
+          descripcion: "El POS de la tienda 44 no transmitió el 2017-07-05 y la entrega
+            original reportó ceros. El dato real se reenvía 15 días después, cuando
+            el pronóstico de esa semana ya fue publicado. Ejercita el INVARIANTE 4:
+            la corrección se añade, no sobrescribe, y la vista vigente cambia sin
+            perder lo que creíamos antes.\n"
+          entrega_original:
+            donde:
+              store_nbr: 44
+            asignar:
+              sales: 0.0
+        - tipo: fuente_no_llega
+          fuente: transactions
+          arrival_date: '2017-07-25'
+          descripcion: "Caída del sistema de POS central: ese día no hay entrega y
+            el archivo se acumula a la del día siguiente. Ejercita el INVARIANTE 5:
+            la ausencia de una fuente es una situación de negocio y NO debe hacer
+            fallar el DAG.\n"
+        origen:
+          kaggle_dir: data/kaggle
+          landing_dir: landing
+          dias_operacion: 46
+          corte_historico:
+    outs:
+    - path: landing
+      hash: md5
+      md5: 637cfb90887b3d8b975900e0322bfe66.dir
+      size: 126625013
+      nfiles: 145
+  ingesta:
+    cmd: python -m reposicion ingesta --asof 2017-08-14
+    deps:
+    - path: landing
+      hash: md5
+      md5: 637cfb90887b3d8b975900e0322bfe66.dir
+      size: 126625013
+      nfiles: 145
+    - path: src/reposicion
+      hash: md5
+      md5: 7d99755b7aeac3c3f67c9c44226f0727.dir
+      size: 128075
+      nfiles: 19
+    params:
+      config/pipeline.yaml:
+        asof: '2017-08-14'
+    outs:
+    - path: data/raw
+      hash: md5
+      md5: 4a1c44ae952e60285376e172edeb86e7.dir
+      size: 22774724
+      nfiles: 123
+  panel:
+    cmd: python -m reposicion panel --asof 2017-08-14
+    deps:
+    - path: data/raw
+      hash: md5
+      md5: 4a1c44ae952e60285376e172edeb86e7.dir
+      size: 22774724
+      nfiles: 123
+    - path: src/reposicion
+      hash: md5
+      md5: 7d99755b7aeac3c3f67c9c44226f0727.dir
+      size: 128075
+      nfiles: 19
+    params:
+      config/model.yaml:
+        entrenamiento:
+          cadencia_origenes_dias: 7
+          ventana_dias: 730
+          minimo_dias_historia: 56
+        features:
+          ventanas:
+          - 7
+          - 14
+          - 28
+          - 56
+          semanas_mismo_dia: 4
+          semanas_cuantiles: 12
+          dias_de_pago:
+          - 15
+          - ultimo
+        pronostico:
+          dias: 7
+          dia_emision: 0
+          cuantiles:
+          - 0.5
+          - 0.8
+          - 0.9
+          - 0.95
+      config/pipeline.yaml:
+        asof: '2017-08-14'
+    outs:
+    - path: data/procesado/asof=2017-08-14/entrenamiento.parquet
+      hash: md5
+      md5: e95111e295319f615bb2cd101325cdb9
+      size: 49474612
+  validacion:
+    cmd: python -m reposicion validar --asof 2017-08-14
+    deps:
+    - path: data/procesado/asof=2017-08-14/entrenamiento.parquet
+      hash: md5
+      md5: e95111e295319f615bb2cd101325cdb9
+      size: 49474612
+    - path: src/reposicion
+      hash: md5
+      md5: 7d99755b7aeac3c3f67c9c44226f0727.dir
+      size: 128075
+      nfiles: 19
+    params:
+      config/costs.yaml:
+        defaults:
+          costo_quiebre: 3.0
+          costo_merma: 1.0
+        familias:
+          PRODUCE:
+            costo_merma: 4.0
+          DAIRY:
+            costo_merma: 3.0
+          MEATS:
+            costo_merma: 4.0
+          POULTRY:
+            costo_merma: 4.0
+          SEAFOOD:
+            costo_merma: 5.0
+          BREAD/BAKERY:
+            costo_merma: 3.0
+          GROCERY I:
+            costo_merma: 0.5
+          GROCERY II:
+            costo_merma: 0.5
+          BEVERAGES:
+            costo_merma: 0.5
+          CLEANING:
+            costo_merma: 0.5
+          PERSONAL CARE:
+            costo_merma: 0.5
+          EGGS:
+            costo_quiebre: 4.0
+            costo_merma: 1.5
+      config/model.yaml:
+        promocion:
+          vigente: baseline_estacional
+          retadores:
+          - lgbm_cuantilico
+          - lineal_cuantilico
+          metrica: costo_negocio
+          mejora_minima: 0.03
+          en_todos_los_pliegues: true
+        pronostico:
+          dias: 7
+          dia_emision: 0
+          cuantiles:
+          - 0.5
+          - 0.8
+          - 0.9
+          - 0.95
+        validacion:
+          pliegues: 3
+          dias_por_pliegue: 28
+      config/pipeline.yaml:
+        asof: '2017-08-14'
+    outs:
+    - path: data/seguimiento/asof=2017-08-14/validacion.csv
+      hash: md5
+      md5: 59c3a4b3f7120cd327e91ea66354ab40
+      size: 1723
+    - path: reportes/asof=2017-08-14/metricas.json
+      hash: md5
+      md5: e9b6139ecd8bd808d2df0fc5519f24fa
+      size: 1305
+    - path: reportes/asof=2017-08-14/promocion.json
+      hash: md5
+      md5: 0a4f2925dcc87643b2fd07c5b22f317d
+      size: 607
+  modelo:
+    cmd: python -m reposicion modelo --asof 2017-08-14
+    deps:
+    - path: data/procesado/asof=2017-08-14/entrenamiento.parquet
+      hash: md5
+      md5: e95111e295319f615bb2cd101325cdb9
+      size: 49474612
+    - path: reportes/asof=2017-08-14/promocion.json
+      hash: md5
+      md5: 0a4f2925dcc87643b2fd07c5b22f317d
+      size: 607
+    - path: src/reposicion
+      hash: md5
+      md5: 7d99755b7aeac3c3f67c9c44226f0727.dir
+      size: 128075
+      nfiles: 19
+    params:
+      config/pipeline.yaml:
+        asof: '2017-08-14'
+    outs:
+    - path: models/asof=2017-08-14
+      hash: md5
+      md5: 93f301c02e7662e0a1e56dfb4760c965.dir
+      size: 7283569
+      nfiles: 2
+  pronostico:
+    cmd: python -m reposicion pronosticar --asof 2017-08-14
+    deps:
+    - path: data/raw
+      hash: md5
+      md5: 4a1c44ae952e60285376e172edeb86e7.dir
+      size: 22774724
+      nfiles: 123
+    - path: models/asof=2017-08-14
+      hash: md5
+      md5: 93f301c02e7662e0a1e56dfb4760c965.dir
+      size: 7283569
+      nfiles: 2
+    - path: src/reposicion
+      hash: md5
+      md5: 7d99755b7aeac3c3f67c9c44226f0727.dir
+      size: 128075
+      nfiles: 19
+    params:
+      config/model.yaml:
+        entrenamiento:
+          cadencia_origenes_dias: 7
+          ventana_dias: 730
+          minimo_dias_historia: 56
+        features:
+          ventanas:
+          - 7
+          - 14
+          - 28
+          - 56
+          semanas_mismo_dia: 4
+          semanas_cuantiles: 12
+          dias_de_pago:
+          - 15
+          - ultimo
+        pronostico:
+          dias: 7
+          dia_emision: 0
+          cuantiles:
+          - 0.5
+          - 0.8
+          - 0.9
+          - 0.95
+      config/pipeline.yaml:
+        asof: '2017-08-14'
+    outs:
+    - path: data/pronosticos/asof=2017-08-14/pronostico.parquet
+      hash: md5
+      md5: c9dd259328cb31412f8066efb20c7d36
+      size: 1025617
+  pedido:
+    cmd: python -m reposicion pedir --asof 2017-08-14
+    deps:
+    - path: data/pronosticos/asof=2017-08-14/pronostico.parquet
+      hash: md5
+      md5: c9dd259328cb31412f8066efb20c7d36
+      size: 1025617
+    - path: src/reposicion
+      hash: md5
+      md5: 7d99755b7aeac3c3f67c9c44226f0727.dir
+      size: 128075
+      nfiles: 19
+    params:
+      config/costs.yaml:
+        defaults:
+          costo_quiebre: 3.0
+          costo_merma: 1.0
+        familias:
+          PRODUCE:
+            costo_merma: 4.0
+          DAIRY:
+            costo_merma: 3.0
+          MEATS:
+            costo_merma: 4.0
+          POULTRY:
+            costo_merma: 4.0
+          SEAFOOD:
+            costo_merma: 5.0
+          BREAD/BAKERY:
+            costo_merma: 3.0
+          GROCERY I:
+            costo_merma: 0.5
+          GROCERY II:
+            costo_merma: 0.5
+          BEVERAGES:
+            costo_merma: 0.5
+          CLEANING:
+            costo_merma: 0.5
+          PERSONAL CARE:
+            costo_merma: 0.5
+          EGGS:
+            costo_quiebre: 4.0
+            costo_merma: 1.5
+        politica:
+          redondear_a_cuantil_estimado: true
+          tope_multiplo_media: 5.0
+          decimales: 2
+          pedido_minimo: 0.5
+      config/pipeline.yaml:
+        asof: '2017-08-14'
+    outs:
+    - path: data/pedidos/asof=2017-08-14
+      hash: md5
+      md5: b6d6079f28068c0f585e01a5edfe1ed9.dir
+      size: 1219546
+      nfiles: 3

@@ -5,6 +5,195 @@ Producto de ML que transforma las ventas diarias de una cadena de supermercados 
 desempeño de los pronósticos ya publicados.
 
 > Laboratorio 1 — Product Development, Maestría en Data Science, Universidad Galileo.
+> Datos: [Store Sales — Time Series Forecasting](https://www.kaggle.com/competitions/store-sales-time-series-forecasting)
+> (Corporación Favorita, Ecuador). 54 tiendas × 33 familias = **1 782 series**.
 
-Este README se completa en la fase final del proyecto con las instrucciones de instalación,
-ejecución y reproducción. Ver `DECISIONES.md` para las decisiones técnicas y de producto.
+---
+
+## Qué decide el producto
+
+La pregunta de negocio no es "¿cuánto se va a vender?" sino **"¿cuánto hay que pedir?"**, y no
+son la misma pregunta. Pedir la venta esperada es la decisión equivocada en casi todas las
+familias:
+
+- Si falta producto se pierde el margen y, a veces, el cliente.
+- Si sobra se pierde capital, espacio de góndola y, en frescos, el producto entero.
+
+Esos dos costos casi nunca son iguales, así que el pedido óptimo **no es el pronóstico central**
+sino un cuantil de la distribución de demanda — el del vendedor de periódicos:
+
+$$q^\* = \frac{c_u}{c_u + c_o}$$
+
+Por eso el modelo no estima una media: estima **cuantiles** (0,5 · 0,8 · 0,9 · 0,95), y la
+política elige cuál usar según los costos de cada familia. Con `costo_quiebre = 3` y
+`costo_merma = 1` el objetivo es el 0,75; en `PRODUCE`, que se descompone en días, baja al 0,43.
+
+Todos esos números viven en [`config/costs.yaml`](config/costs.yaml). **Cambiar un costo cambia
+la recomendación sin tocar una línea de Python ni reentrenar el modelo** — ver
+[la demostración](#cambiar-un-costo-sin-tocar-código).
+
+## Las tres salidas
+
+| Salida | Dónde | Para quién |
+|---|---|---|
+| Pronóstico cuantílico diario por tienda × familia | `data/pronosticos/asof=<fecha>/` | insumo interno |
+| Pedido sugerido de la semana | `data/pedidos/asof=<fecha>/` (Parquet + CSV) | gerente de tienda y centro de distribución |
+| Métricas y decisión de promoción del modelo | `reportes/asof=<fecha>/` (en Git) | quien mantiene el modelo |
+
+---
+
+## Las cinco reglas que no se negocian
+
+Están completas en [`CLAUDE.md`](CLAUDE.md) y son el contrato del proyecto. En resumen:
+
+1. **Corrección punto-en-el-tiempo.** Un pronóstico para la fecha `D` sólo puede usar lo que
+   *había llegado* en `D`. Toda lectura filtra por `arrival_date`, nunca por `date`. No existe
+   `datetime.now()` en `src/` ni en `dags/`, y hay una prueba que falla si aparece.
+2. **La bandeja es un sistema externo de sólo lectura.** El producto lee `landing/` y jamás la
+   escribe. El único autorizado es el simulador, que no es parte del producto.
+3. **Idempotencia.** Correr una tarea N veces da el mismo resultado que correrla una vez:
+   escritura atómica, particiones reescritas completas, nunca *append*.
+4. **El histórico es inmutable.** Una corrección llega como registro nuevo con `arrival_date`
+   posterior; la vista vigente se resuelve en lectura. Así se puede responder "¿qué sabíamos el
+   15 de julio?" meses después.
+5. **Dato inválido ≠ situación de negocio.** Una columna faltante va a cuarentena y la tarea
+   falla. Unas ventas en cero por feriado, una tienda nueva o una fuente que no llegó hoy se
+   procesan con normalidad y **nunca** hacen fallar el DAG.
+
+La distinción entre `date` y `arrival_date` es la que sostiene todo lo demás: `date` es *a qué
+día se refieren los datos*, `arrival_date` es *cuándo los supimos*.
+
+---
+
+## Puesta en marcha
+
+Requisitos: [uv](https://docs.astral.sh/uv/), Git y ~1,5 GB de disco. No hace falta Docker para
+nada de lo que sigue.
+
+```bash
+uv sync                      # crea el entorno a partir de uv.lock
+uv run pytest                # 237 pruebas, sin Airflow y sin Docker
+uv run ruff check .
+```
+
+Los CSV de Kaggle no están en Git (se versionan con DVC). Hay dos caminos:
+
+```bash
+uv run dvc pull              # si tienes acceso a la caché o al remoto
+```
+
+o bien descargarlos de Kaggle y colocarlos en `data/kaggle/` (`train.csv`, `stores.csv`,
+`oil.csv`, `holidays_events.csv`, `transactions.csv`). A partir de ahí el pipeline reconstruye
+todo lo demás:
+
+```bash
+uv run dvc repro
+```
+
+---
+
+## El pipeline
+
+Siete etapas declaradas en [`dvc.yaml`](dvc.yaml). La fecha lógica de la emisión está en
+[`config/pipeline.yaml`](config/pipeline.yaml), versionada: **el commit describe un pronóstico
+concreto.**
+
+| Etapa | Qué hace | Salida |
+|---|---|---|
+| `bandeja` | Simula el sistema de origen: reparte los CSV de Kaggle en entregas diarias con latencias e incidentes reales. **No es parte del producto.** | `landing/` |
+| `ingesta` | Valida contra contrato y materializa el almacén propio en Parquet. Lo que incumple va a cuarentena. | `data/raw/` |
+| `panel` | Genera ejemplos de entrenamiento simulando 105 emisiones pasadas, sin fuga temporal. | `data/procesado/` |
+| `validacion` | Los tres modelos compiten con los mismos pliegues; decide quién opera. | `reportes/`, `data/seguimiento/` |
+| `modelo` | Ajusta el modelo promovido sobre el panel completo y lo registra con su ficha. | `models/` |
+| `pronostico` | Emite los cuantiles del horizonte. Las series sin historia las atiende el baseline. | `data/pronosticos/` |
+| `pedido` | Aplica los costos y produce el pedido sugerido. | `data/pedidos/` |
+
+Cada etapa se invoca por la misma orden que usará Airflow, que es la única frontera entre
+orquestación y producto:
+
+```bash
+uv run python -m reposicion pronosticar --asof 2017-08-14
+```
+
+`--asof` es obligatorio en todas y nunca tiene valor por defecto: la fecha lógica entra desde
+fuera o no se ejecuta nada.
+
+---
+
+## Reproducir un pronóstico pasado
+
+<!-- EVIDENCIA_DVC -->
+
+---
+
+## Cambiar un costo sin tocar código
+
+<!-- EVIDENCIA_COSTOS -->
+
+---
+
+## Modelado
+
+Tres modelos compiten bajo **validación de origen móvil**, con los mismos pliegues, el mismo
+panel y las mismas series. La métrica que decide la promoción es el **costo de negocio**, no el
+error estadístico, y el criterio exige ganar en **todos** los pliegues: un modelo que mejora
+mucho en uno y empeora en otro es inestable, y el promedio lo esconde.
+
+<!-- EVIDENCIA_MODELOS -->
+
+**Deep learning fue evaluado y descartado** con cuatro evidencias medidas sobre estos datos
+(saturación de capacidad, distribución del error, autocorrelación residual y el resultado del
+propio criterio de promoción). El análisis completo está en
+[`DECISIONES.md`](DECISIONES.md#1-deep-learning-evaluado-y-descartado).
+
+---
+
+## Estructura del repositorio
+
+```
+config/           decisiones de negocio en YAML: costos, horizonte, cuantiles, umbrales
+dags/             orquestación de Airflow — sólo tareas y dependencias, cero lógica
+src/reposicion/   el producto
+  config.py         rutas y carga de configuración
+  contracts.py      contratos de datos (Pandera) por fuente
+  landing.py        lectura as-of de la bandeja
+  io.py             escritura atómica y particiones
+  ingesta.py        validación, cuarentena y almacén propio
+  features.py       variables explicativas ancladas al origen
+  models/           baseline, LightGBM y regresión cuantílica lineal
+  metrics.py        pinball, cobertura y costo de negocio
+  validacion.py     pliegues móviles y criterio de promoción
+  policy.py         del pronóstico al pedido (vendedor de periódicos)
+  pronostico.py     emisión, con respaldo para series sin historia
+  registro.py       artefactos de modelo con su ficha
+  cli.py            puntos de entrada del pipeline
+tests/            237 pruebas; corren sin Airflow y sin Docker
+tools/            simulador del sistema de origen (NO es parte del producto)
+reportes/         métricas y decisiones de promoción (sí van a Git)
+```
+
+## Pruebas
+
+```bash
+uv run pytest                  # todo
+uv run pytest -m "not slow"    # sin las que entrenan modelos
+```
+
+Las irrenunciables, que son las que justifican el resto:
+
+| Qué vigila | Dónde |
+|---|---|
+| Que no haya fuga temporal en las variables | `test_features.py` |
+| Que la lectura as-of ignore lo que llegó después | `test_landing.py` |
+| Que una corrección retroactiva cambie la vista vigente sin borrar el histórico | `test_landing.py` |
+| Que correr una etapa dos veces dé el mismo byte | `test_cli.py` |
+| Que entrenar dos veces dé el mismo artefacto | `test_registro.py` |
+| Que subir el costo de quiebre aumente el pedido | `test_policy.py` |
+| Que no aparezca `datetime.now()` en el producto | `test_invariantes.py` |
+| Que no haya datos ni modelos versionados en Git | `test_invariantes.py` |
+| Que ninguna etapa de DVC omita el código como dependencia | `test_invariantes.py` |
+
+## Documentación
+
+- [`CLAUDE.md`](CLAUDE.md) — las reglas del proyecto: invariantes, arquitectura, datos, Git.
+- [`DECISIONES.md`](DECISIONES.md) — cada decisión relevante con su alternativa descartada.

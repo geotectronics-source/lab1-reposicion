@@ -15,13 +15,34 @@ htmlcov/
 # repositorio. Sin ella, un patrón como `models/` coincide a CUALQUIER nivel y
 # excluye también `src/reposicion/models/`, que es código fuente: el paquete
 # desaparece del repositorio sin aviso y sólo falla al clonar en limpio.
-/data/
+#
+# `data/` se excluye SUBCARPETA POR SUBCARPETA y nunca en bloque. Las dos
+# formas más cómodas de escribirlo rompen algo, y las dos costaron un rato:
+#
+#   /data/           -> Git no puede reincluir un archivo si un directorio
+#                       padre está excluido, así que `!*.dvc` no tiene ningún
+#                       efecto y el puntero de DVC no llega al repositorio.
+#   /data/*          -> el puntero sí llega, pero DVC **no desciende a
+#                       directorios ignorados por Git** cuando busca archivos
+#                       `.dvc`, así que `data/kaggle.dvc` se vuelve invisible
+#                       para `dvc checkout` y `dvc pull`, que entonces borran
+#                       `data/kaggle` "por enlace sin usar".
+#
+# Enumerar las subcarpetas deja `data/` visible para el recorrido de DVC y
+# excluye igual todo lo que no debe versionarse. Una subcarpeta nueva no
+# quedaría cubierta, y de eso se encarga la prueba
+# `test_no_hay_datos_ni_modelos_en_el_repositorio`.
+/data/kaggle/
+/data/raw/
+/data/procesado/
+/data/pronosticos/
+/data/pedidos/
+/data/seguimiento/
+/data/cuarentena/
+# `landing/` y `models/` sí pueden ir en bloque: son SALIDAS de etapas, su
+# hash vive en `dvc.lock` y no hay ningún `.dvc` dentro que DVC deba encontrar.
 /landing/
 /models/
-# Excepción: los punteros .dvc y los .gitignore generados por DVC SÍ van a Git.
-!*.dvc
-!/data/.gitignore
-!/landing/.gitignore
 
 # --- Cache local de DVC (el remoto se configura aparte) ---
 /.dvc/cache

@@ -1,0 +1,23 @@
+{
+  "campeon": "lgbm_cuantilico",
+  "decisiones": {
+    "lgbm_cuantilico": {
+      "mejoras": {
+        "1": 0.14713684851301592,
+        "2": 0.17490267960770223,
+        "3": 0.23769699408593511
+      },
+      "promover": true,
+      "razon": "mejora costo_negocio al menos 3% en todos los pliegues"
+    },
+    "lineal_cuantilico": {
+      "mejoras": {
+        "1": -1.6964951890676028,
+        "2": -0.9452586772330818,
+        "3": -0.4295621636680483
+      },
+      "promover": false,
+      "razon": "la mejora mínima observada (-169.6%) no alcanza el umbral de 3%"
+    }
+  }
+}
