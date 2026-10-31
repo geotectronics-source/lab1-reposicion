@@ -253,12 +253,28 @@ $ uv run dvc push
 280 files pushed
 ```
 
-El remoto es una **carpeta local** (`../dvc-remote-lab1`, 200 MB), configurada así a propósito:
-el evaluador no necesita credenciales de ninguna nube para reproducir nada, y la mecánica que se
-demuestra (`push`, `pull`, `checkout`) es la misma. La contrapartida, explícita: no sirve para
-compartir entre máquinas; para eso habría que cambiar una línea de `.dvc/config`. Y como la
-etapa `bandeja` regenera la bandeja desde los CSV de Kaggle, quien clone el repositorio puede
-reconstruirlo todo con `dvc repro` aunque no tenga acceso a esta caché.
+El remoto es una **carpeta local** (200 MB), configurada así a propósito: el evaluador no
+necesita credenciales de ninguna nube para reproducir nada, y la mecánica que se demuestra
+(`push`, `pull`, `checkout`) es la misma.
+
+Dos contrapartidas, explícitas. La primera: **no sirve para compartir entre máquinas.** Quien
+clone este repositorio no tiene la carpeta, así que `dvc pull` no le dará nada; el camino para
+reconstruir es poner los CSV de Kaggle en `data/kaggle/` y lanzar `dvc repro`, porque la etapa
+`bandeja` regenera la bandeja desde ahí. La segunda es una trampa de la ruta:
+
+```ini
+['remote "local"']
+    url = ../../dvc-remote-lab1
+```
+
+**DVC resuelve las rutas relativas respecto a `.dvc/`, no a la raíz del repositorio**, y de ahí
+el `../../`. La consecuencia práctica es que el remoto queda atado a *dónde* esté el clon: si el
+repositorio se mueve de sitio, la ruta apunta a otra parte y `dvc pull` falla sin decir por qué.
+Para usar otro remoto basta una línea, que además no se versiona:
+
+```bash
+dvc remote modify --local local url /ruta/a/tu/remoto
+```
 
 ---
 
@@ -697,6 +713,20 @@ lineal y duplicado el costo de operación.
 La causa está en la cobertura: el lineal sobrecubre (0,978 donde debería dar 0,95). En error
 logarítmico pasarse apenas cuenta; en inventario real se traduce en merma.
 
+**Y la conclusión aguanta en tres paneles distintos.** El reentrenamiento que corrió Airflow sobre
+el panel del 2017-08-01 dio una tercera medición independiente:
+
+| panel | costo del lineal | RMSLE del lineal | RMSLE del baseline | ¿gana en costo? |
+|---|---|---|---|---|
+| 2017-07-17 | 166,89 | 0,456 | 0,634 | no |
+| 2017-08-01 | 142,95 | 0,429 | 0,547 | no |
+| 2017-08-14 | 263,06 | 0,434 | 0,507 | no |
+
+El costo del lineal se mueve un 84 % entre paneles mientras su RMSLE se queda entre 0,43 y 0,46:
+es la firma de un modelo que no converge en las 60 épocas que se le dan, y está analizado en
+[`DECISIONES.md` §0](DECISIONES.md#0-los-tres-modelos-y-por-qué-gana-el-que-gana). Lo que no se
+mueve es el orden: gana al baseline en RMSLE y pierde en costo **las tres veces**.
+
 **Deep learning fue evaluado y descartado** con cuatro evidencias medidas sobre estos datos
 (saturación de capacidad, distribución del error, autocorrelación residual y el resultado del
 propio criterio de promoción). El análisis completo está en
@@ -755,6 +785,30 @@ Las irrenunciables, que son las que justifican el resto:
 | Que un hueco de entrega no se confunda con una ingesta parada | `test_calidad.py` |
 | Que el seguimiento no rellene con cero lo que aún no ha llegado | `test_seguimiento.py` |
 | Que un backfill no use un modelo entrenado después de su fecha | `test_registro.py` |
+
+## Dónde está cada requerimiento del enunciado
+
+| # | Requerimiento | Dónde |
+|---|---|---|
+| 1 | Repositorio con ramas y Pull Requests, `main` protegida | un PR por fase, ninguno directo a `main`, que exige PR, historial lineal y los dos checks |
+| 1 | `pytest` en GitHub Actions | [`.github/workflows/`](.github/workflows) — matriz Ubuntu + Windows |
+| 1 | `CLAUDE.md` con las reglas del proyecto | [`CLAUDE.md`](CLAUDE.md) |
+| 2 | Ni datos ni modelos en Git | `git ls-files -- data landing models` devuelve sólo `data/kaggle.dvc`; hay prueba que lo vigila |
+| 2 | Remoto de DVC | carpeta local, justificada en [el remoto](#el-remoto) |
+| 2 | Reproducir un pronóstico pasado, con comandos y resultados | [Reproducir un pronóstico pasado](#reproducir-un-pronóstico-pasado) |
+| 3 | Airflow 3 con Docker Compose | [`docker/`](docker) — `LocalExecutor`, cinco servicios |
+| 3 | Tareas idempotentes | escritura atómica y partición por fecha lógica; prueba de byte idéntico |
+| 3 | Cuarentena del dato inválido | [`src/reposicion/ingesta.py`](src/reposicion/ingesta.py) — partición todo-o-nada |
+| 3 | Las situaciones de negocio no hacen fallar el DAG | [Un hueco de entrega no es un fallo](#un-hueco-de-entrega-no-es-un-fallo), con el incidente del 2017-07-25 medido |
+| 3 | Backfill | 33 días de ingesta, 5 emisiones y 1 reentrenamiento, en [el backfill](#el-backfill-corrido-de-verdad) |
+| 3 | Los DAGs sólo orquestan | [`dags/`](dags) — prueba estática que falla si un DAG importa el producto o tiene un `if` |
+| 3 | Seguimiento del desempeño | [`src/reposicion/seguimiento.py`](src/reposicion/seguimiento.py) y [la tarea que DVC no puede expresar](#el-seguimiento-es-la-tarea-que-dvc-no-puede-expresar) |
+| 4 | Baseline y un modelo que lo gane | [Modelado](#modelado) — lgbm gana en los tres pliegues |
+| 4 | Deep learning justificado en costo/beneficio | [`DECISIONES.md` §1](DECISIONES.md#1-deep-learning-evaluado-y-descartado) — evaluado y descartado con cuatro evidencias |
+| 4 | Misma validación temporal para todos | origen móvil, mismos pliegues y mismo panel; prohibido `KFold` sin orden |
+| 4 | Métricas técnicas **y** de negocio | pinball, MAE, RMSLE, cobertura **y** costo de negocio, juntas en `reportes/` |
+| 4 | Criterio de promoción explícito | `promocion` en [`config/model.yaml`](config/model.yaml): costo, mejora mínima del 3 %, en todos los pliegues |
+| 5 | README y DECISIONES | este archivo y [`DECISIONES.md`](DECISIONES.md) |
 
 ## Documentación
 
