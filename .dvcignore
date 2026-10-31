@@ -1,0 +1,11 @@
+# Add patterns of files dvc should ignore, which could improve
+# the performance. Learn more at
+# https://dvc.org/doc/user-guide/dvcignore
+
+# Cachés de Python: no son entradas del pipeline y hacer su hash en cada
+# `repro` cuesta tiempo y produce diferencias espurias (un .pyc cambia al
+# cambiar de versión de intérprete, aunque el .py sea idéntico).
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/

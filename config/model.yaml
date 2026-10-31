@@ -65,6 +65,18 @@ promocion:
   # Cuándo un modelo nuevo reemplaza al vigente. El criterio es explícito y
   # versionado para que la decisión no dependa del criterio de quien mire las
   # métricas ese día.
+
+  # El modelo contra el que se mide todo. Arranca en el de referencia: hasta
+  # que un retador demuestre lo contrario, lo que opera es lo más simple que
+  # funciona. Cuando se promueve uno, este valor se actualiza en un commit, de
+  # modo que el historial de Git cuenta qué modelo operaba en cada fecha.
+  vigente: baseline_estacional
+
+  # Los que compiten. Todos se evalúan con los MISMOS pliegues y el MISMO
+  # panel; si no, la comparación no significa nada.
+  retadores:
+    - lgbm_cuantilico
+    - lineal_cuantilico
   #
   # Manda el costo de negocio, no el error estadístico: un modelo con mejor
   # RMSLE que se equivoca en la dirección cara es peor producto.

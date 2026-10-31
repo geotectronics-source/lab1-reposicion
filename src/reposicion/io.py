@@ -18,8 +18,10 @@ leer una sola fuente.
 
 from __future__ import annotations
 
+import json
 import re
 import shutil
+from collections.abc import Callable
 from pathlib import Path
 
 import pandas as pd
@@ -57,17 +59,27 @@ def a_fecha(serie: pd.Series) -> pd.Series:
     return pd.to_datetime(serie).astype(DTYPE_FECHA)
 
 
-def marcar_llegada(df: pd.DataFrame, arrival_date: str | pd.Timestamp) -> pd.DataFrame:
-    """Sella el DataFrame con la fecha en que se conoció.
+def marcar_fecha(df: pd.DataFrame, columna: str, fecha: str | pd.Timestamp) -> pd.DataFrame:
+    """Añade una columna con la misma fecha en todas las filas.
 
-    Asignar un `Timestamp` escalar dejaría la columna en microsegundos; se
-    construye la Serie con el dtype explícito para que todas las rutas de
-    lectura entreguen exactamente el mismo tipo.
+    Existe porque asignar un `Timestamp` escalar deja la columna en
+    microsegundos y el proyecto exige nanosegundos. Es un fallo silencioso:
+    no lanza error, sólo hace que las comparaciones con otras columnas de
+    fecha dejen de coincidir y el resultado salga vacío.
+
+    Esta función es la cuarta versión del mismo arreglo. Las tres anteriores
+    fueron parches en el sitio donde apareció el problema —la ingesta, el
+    panel, la emisión— hasta que quedó claro que el patrón es general:
+    *sellar un DataFrame con una fecha*. Mientras hubiera un camino que no
+    pasara por aquí, el error volvería.
     """
-    df[COLUMNA_LLEGADA] = pd.Series(
-        normalizar_fecha(arrival_date), index=df.index, dtype=DTYPE_FECHA
-    )
+    df[columna] = pd.Series(normalizar_fecha(fecha), index=df.index, dtype=DTYPE_FECHA)
     return df
+
+
+def marcar_llegada(df: pd.DataFrame, arrival_date: str | pd.Timestamp) -> pd.DataFrame:
+    """Sella el DataFrame con la fecha en que se conoció."""
+    return marcar_fecha(df, COLUMNA_LLEGADA, arrival_date)
 
 
 def ruta_particion(base: Path, fuente: str, arrival_date: str | pd.Timestamp) -> Path:
@@ -75,25 +87,72 @@ def ruta_particion(base: Path, fuente: str, arrival_date: str | pd.Timestamp) ->
     return base / fuente / f"arrival_date={normalizar_fecha(arrival_date):%Y-%m-%d}"
 
 
+def escribir_atomico(destino: Path, escribir: Callable[[Path], None]) -> Path:
+    """Materializa `destino` sin que exista nunca a medias.
+
+    `escribir` recibe una ruta temporal; si termina sin excepción, el temporal
+    se renombra al destino. `Path.replace` es atómico dentro del mismo
+    volumen, así que un fallo a mitad de escritura deja el archivo anterior
+    intacto en lugar de uno truncado que la siguiente tarea leería como
+    válido.
+
+    Es la mecánica de la INVARIANTE 3, y está en un solo sitio para que
+    ninguna etapa del pipeline tenga que recordarla. El temporal lleva punto
+    inicial para que ni el descubridor de particiones ni DVC lo confundan con
+    una salida.
+    """
+    destino.parent.mkdir(parents=True, exist_ok=True)
+    tmp = destino.with_name(f".{destino.name}.tmp")
+    try:
+        escribir(tmp)
+        tmp.replace(destino)
+    finally:
+        # Tras un renombrado correcto ya no existe: esto sólo limpia el
+        # residuo de un fallo, que si no quedaría confundiendo al siguiente run.
+        tmp.unlink(missing_ok=True)
+    return destino
+
+
+def escribir_parquet(df: pd.DataFrame, destino: Path) -> Path:
+    """Parquet atómico. Es el formato de intercambio interno porque preserva
+    los tipos; en CSV las fechas volverían como texto."""
+    return escribir_atomico(
+        destino,
+        lambda ruta: df.to_parquet(ruta, index=False, engine="pyarrow", compression="snappy"),
+    )
+
+
+def escribir_csv(df: pd.DataFrame, destino: Path) -> Path:
+    """CSV atómico, sólo para lo que va a leer una persona.
+
+    Dentro del producto se usa Parquet. El CSV existe porque el gerente abre
+    el pedido en una hoja de cálculo, y una lectura humana no necesita tipos.
+    """
+    return escribir_atomico(destino, lambda ruta: df.to_csv(ruta, index=False, encoding="utf-8"))
+
+
+def escribir_json(contenido: dict, destino: Path) -> Path:
+    """JSON atómico y con las claves ordenadas.
+
+    El orden fijo no es estética: DVC compara la salida como contenido, y un
+    orden que cambia entre ejecuciones haría aparecer diferencias donde no las
+    hay.
+    """
+    texto = json.dumps(contenido, indent=2, ensure_ascii=False, sort_keys=True, default=str)
+    return escribir_atomico(
+        destino, lambda ruta: ruta.write_text(texto + "\n", encoding="utf-8")
+    )
+
+
 def escribir_particion(df: pd.DataFrame, destino: Path) -> Path:
     """Escribe una partición completa de forma atómica.
-
-    Se escribe a un archivo temporal y se renombra al destino. `Path.replace`
-    es atómico dentro del mismo volumen, así que un fallo a mitad de escritura
-    deja la partición anterior intacta en lugar de un Parquet truncado que la
-    siguiente tarea leería como válido.
 
     La partición se REESCRIBE completa. No existe modo de agregado: ejecutar
     la tarea dos veces debe dar el mismo resultado que ejecutarla una
     (INVARIANTE 3), y un `append` duplicaría las filas en el segundo intento.
     """
     destino.mkdir(parents=True, exist_ok=True)
-    final = destino / ARCHIVO_PARTICION
-    tmp = destino / f".{ARCHIVO_PARTICION}.tmp"
-
-    df.to_parquet(tmp, index=False, engine="pyarrow", compression="snappy")
-    tmp.replace(final)
-    return final
+    return escribir_parquet(df, destino / ARCHIVO_PARTICION)
 
 
 def listar_particiones(
