@@ -36,6 +36,12 @@ features:
   # sábado anterior que al viernes inmediato.
   semanas_mismo_dia: 4
 
+  # Semanas para los cuantiles empíricos del mismo día de la semana. Son más
+  # que las anteriores a propósito: con sólo 4 observaciones por día, el
+  # cuantil 0.95 degenera en el máximo de la muestra y resulta puro ruido.
+  # Con 12 hay suficiente masa para que los cuantiles altos signifiquen algo.
+  semanas_cuantiles: 12
+
   # Días del mes en que cobra la mayoría de los trabajadores en Ecuador. El
   # dataset de Favorita muestra picos claros de venta alrededor de estas
   # fechas; `ultimo` representa el último día del mes, que varía.
@@ -54,6 +60,23 @@ entrenamiento:
   # Series sin al menos esta historia caen al baseline: no hay con qué estimar
   # su nivel ni su estacionalidad semanal.
   minimo_dias_historia: 56
+
+promocion:
+  # Cuándo un modelo nuevo reemplaza al vigente. El criterio es explícito y
+  # versionado para que la decisión no dependa del criterio de quien mire las
+  # métricas ese día.
+  #
+  # Manda el costo de negocio, no el error estadístico: un modelo con mejor
+  # RMSLE que se equivoca en la dirección cara es peor producto.
+  metrica: costo_negocio
+
+  # Mejora mínima exigida, en proporción. Por debajo de esto la diferencia no
+  # compensa el riesgo de cambiar un modelo que ya opera bien.
+  mejora_minima: 0.03
+
+  # Debe ganar en TODOS los pliegues, no en el promedio. Un modelo que mejora
+  # mucho en uno y empeora en otro es inestable, y la media lo esconde.
+  en_todos_los_pliegues: true
 
 validacion:
   # Validación de origen móvil: la única honesta en series temporales. Cada

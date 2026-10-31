@@ -1,0 +1,74 @@
+# =============================================================================
+# Costos de negocio
+# =============================================================================
+# Este archivo decide cuánto se pide. Cambiar un número aquí cambia la
+# recomendación SIN tocar código ni reentrenar el modelo, que es el requisito
+# central del producto.
+#
+# Mecánica (problema del vendedor de periódicos):
+#
+#     q* = costo_quiebre / (costo_quiebre + costo_merma)
+#
+# y se pide el cuantil q* del pronóstico. La intuición: si quedarse sin
+# producto duele el triple que tirarlo, conviene cubrirse hasta el punto en
+# que sólo haya un 25 % de probabilidad de quedarse corto.
+#
+# Las unidades son relativas: sólo importa la razón entre ambos costos. Por
+# eso no hace falta conocer el precio real de cada producto para que la
+# política sea correcta.
+# =============================================================================
+
+defaults:
+  # Costo de quedarse sin producto: margen perdido más el cliente que se va a
+  # la competencia y, a veces, no vuelve.
+  costo_quiebre: 3.0
+  # Costo de que sobre: capital inmovilizado y espacio de góndola.
+  costo_merma: 1.0
+  # -> q* = 3 / (3 + 1) = 0.75
+
+# -----------------------------------------------------------------------------
+# Ajustes por familia
+# -----------------------------------------------------------------------------
+# Lo que distingue a un perecedero de un abarrote no es el margen, es qué pasa
+# con lo que sobra: la fruta se tira, el arroz se vende la semana siguiente.
+familias:
+  PRODUCE:
+    costo_merma: 4.0 # se descompone en días -> q* = 0.43, pide con cautela
+  DAIRY:
+    costo_merma: 3.0 # caducidad corta -> q* = 0.50
+  MEATS:
+    costo_merma: 4.0 # -> q* = 0.43
+  POULTRY:
+    costo_merma: 4.0 # -> q* = 0.43
+  SEAFOOD:
+    costo_merma: 5.0 # el más perecedero -> q* = 0.375
+  BREAD/BAKERY:
+    costo_merma: 3.0 # -> q* = 0.50
+
+  GROCERY I:
+    costo_merma: 0.5 # no perece -> q* = 0.86, conviene no quebrar nunca
+  GROCERY II:
+    costo_merma: 0.5
+  BEVERAGES:
+    costo_merma: 0.5 # alta rotación y sin caducidad corta -> q* = 0.86
+  CLEANING:
+    costo_merma: 0.5
+  PERSONAL CARE:
+    costo_merma: 0.5
+
+  # Alta rotación y además producto de atracción: si falta, el cliente hace
+  # toda la compra en otro supermercado.
+  EGGS:
+    costo_quiebre: 4.0
+    costo_merma: 1.5 # -> q* = 0.73
+
+politica:
+  # El cuantil se redondea al más cercano de los que estima el modelo
+  # (ver `cuantiles` en model.yaml). Interpolar entre cuantiles daría una
+  # falsa precisión: el modelo no fue entrenado para los valores intermedios.
+  redondear_a_cuantil_estimado: true
+
+  # Tope de seguridad: ninguna sugerencia puede superar este múltiplo de la
+  # venta media reciente. Protege contra un pronóstico desbocado por un dato
+  # anómalo que haya pasado la validación.
+  tope_multiplo_media: 5.0

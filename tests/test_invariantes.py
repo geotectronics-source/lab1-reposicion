@@ -7,6 +7,8 @@ de inmediato el tipo de error que no se nota revisando un diff.
 
 from __future__ import annotations
 
+import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -23,6 +25,49 @@ def _fuentes_del_producto() -> list[Path]:
     for directorio in DIRECTORIOS_DEL_PRODUCTO:
         archivos.extend((RAIZ / directorio).rglob("*.py"))
     return archivos
+
+
+# ---------------------------------------------------------------------------
+# El código fuente tiene que estar en el repositorio
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="requiere git")
+def test_todo_el_codigo_fuente_esta_versionado():
+    """Regresión: un patrón sin anclar en .gitignore borró un paquete entero.
+
+    La regla `models/`, pensada para los modelos entrenados de la raíz,
+    coincide a cualquier profundidad y excluía también
+    `src/reposicion/models/`. El paquete desapareció del repositorio sin aviso:
+    en la máquina de desarrollo todo seguía funcionando porque los archivos
+    estaban en disco, y sólo un clon limpio podía detectarlo.
+
+    Las rutas de datos van ahora ancladas con barra inicial, y esta prueba
+    vigila que ningún archivo de `src/` ni de `dags/` quede fuera.
+    """
+    resultado = subprocess.run(
+        ["git", "ls-files", "src", "dags", "tests"],
+        cwd=RAIZ,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if resultado.returncode != 0:
+        pytest.skip("el directorio no es un repositorio git")
+
+    versionados = {RAIZ / linea for linea in resultado.stdout.splitlines() if linea}
+    en_disco = {
+        ruta
+        for directorio in ("src", "dags", "tests")
+        for ruta in (RAIZ / directorio).rglob("*.py")
+        if "__pycache__" not in ruta.parts
+    }
+
+    faltantes = sorted(str(p.relative_to(RAIZ)) for p in en_disco - versionados)
+    assert not faltantes, (
+        f"Código fuente ausente del repositorio: {faltantes}. "
+        "Revisa .gitignore: un patrón sin barra inicial coincide a cualquier nivel."
+    )
 
 
 # ---------------------------------------------------------------------------
