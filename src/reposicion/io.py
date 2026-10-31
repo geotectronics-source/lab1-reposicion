@@ -122,25 +122,49 @@ def escribir_parquet(df: pd.DataFrame, destino: Path) -> Path:
     )
 
 
+#: Fin de línea de **todas** las salidas de texto del producto, en cualquier
+#: sistema operativo.
+#:
+#: Hay que decirlo explícitamente porque ni `Path.write_text` ni
+#: `DataFrame.to_csv` lo hacen: los dos abren el archivo en modo texto y
+#: traducen `\n` al fin de línea de la plataforma, de modo que el mismo
+#: pipeline producía CRLF en Windows y LF en Linux.
+#:
+#: No es cosmético por dos razones concretas. **DVC compara bytes**: un CSV
+#: de pedido con 1.783 líneas cambia de hash entre plataformas sin que cambie
+#: un dato, y `dvc repro` en otro sistema da la etapa por obsoleta. Y los JSON
+#: de `reportes/` son salidas `cache: false` **rastreadas en Git**, así que
+#: cada `dvc repro` en Windows los dejaba marcados como modificados aunque
+#: `git diff` saliera vacío, con el árbol de trabajo permanentemente sucio.
+FIN_DE_LINEA = "\n"
+
+
 def escribir_csv(df: pd.DataFrame, destino: Path) -> Path:
     """CSV atómico, sólo para lo que va a leer una persona.
 
     Dentro del producto se usa Parquet. El CSV existe porque el gerente abre
     el pedido en una hoja de cálculo, y una lectura humana no necesita tipos.
     """
-    return escribir_atomico(destino, lambda ruta: df.to_csv(ruta, index=False, encoding="utf-8"))
+    return escribir_atomico(
+        destino,
+        lambda ruta: df.to_csv(
+            ruta, index=False, encoding="utf-8", lineterminator=FIN_DE_LINEA
+        ),
+    )
 
 
 def escribir_json(contenido: dict, destino: Path) -> Path:
-    """JSON atómico y con las claves ordenadas.
+    """JSON atómico, con las claves ordenadas y fin de línea fijo.
 
-    El orden fijo no es estética: DVC compara la salida como contenido, y un
-    orden que cambia entre ejecuciones haría aparecer diferencias donde no las
-    hay.
+    Ninguna de las dos cosas es estética: **DVC compara la salida como
+    contenido**, así que un orden de claves que cambie entre ejecuciones —o un
+    fin de línea que cambie entre sistemas operativos— haría aparecer
+    diferencias donde no las hay.
     """
     texto = json.dumps(contenido, indent=2, ensure_ascii=False, sort_keys=True, default=str)
     return escribir_atomico(
-        destino, lambda ruta: ruta.write_text(texto + "\n", encoding="utf-8")
+        destino,
+        lambda ruta: ruta.write_text(texto + "\n", encoding="utf-8", newline=FIN_DE_LINEA),
     )
 
 

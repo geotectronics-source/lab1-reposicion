@@ -11,6 +11,7 @@ import shutil
 import subprocess
 from pathlib import Path
 
+import pandas as pd
 import pytest
 import yaml
 
@@ -281,3 +282,45 @@ def test_la_ruta_del_contenedor_se_declara_una_sola_vez():
         "averigua dónde está montado sin llevar la ruta dentro"
     )
     assert "..:/opt/proyecto" in compose, "falta el volumen con el repositorio"
+
+
+# ---------------------------------------------------------------------------
+# Las salidas de texto no dependen del sistema operativo
+# ---------------------------------------------------------------------------
+
+
+def test_las_salidas_de_texto_siempre_usan_lf(tmp_path):
+    """Regresión: el producto escribía CRLF en Windows y LF en Linux.
+
+    Ni `Path.write_text` ni `DataFrame.to_csv` fijan el fin de línea: los dos
+    abren en modo texto y traducen `\n` al de la plataforma. El efecto no es
+    cosmético y se manifestó de dos formas distintas:
+
+    - **DVC compara bytes.** Un CSV de pedido cambiaba de hash entre Windows y
+      Linux sin que cambiara un dato, así que `dvc repro` en otro sistema daba
+      la etapa por obsoleta.
+    - Los JSON de `reportes/` son salidas `cache: false` **rastreadas en
+      Git**, de modo que cada `dvc repro` en Windows dejaba el árbol de
+      trabajo sucio aunque `git diff` saliera vacío.
+
+    Se comprueba sobre los escritores y no sobre los archivos del repositorio
+    porque `.gitattributes` normaliza lo que entra al índice: mirar ahí daría
+    siempre verde y taparía el defecto.
+    """
+    from reposicion.io import escribir_csv, escribir_json
+
+    json_escrito = escribir_json(
+        {"b": 1, "a": [1, 2], "texto": "con tilde: á"}, tmp_path / "r.json"
+    )
+    csv_escrito = escribir_csv(
+        pd.DataFrame({"familia": ["GROCERY I", "PRODUCE"], "pedido": [1.5, 2.0]}),
+        tmp_path / "r.csv",
+    )
+
+    for ruta in (json_escrito, csv_escrito):
+        crudo = ruta.read_bytes()
+        assert b"\r" not in crudo, (
+            f"{ruta.name} lleva retorno de carro: la salida depende del sistema "
+            "operativo y su hash cambiaría entre plataformas sin cambiar un dato."
+        )
+        assert crudo.endswith(b"\n"), f"{ruta.name} no termina en salto de línea"
