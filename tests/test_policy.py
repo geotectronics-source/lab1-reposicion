@@ -26,7 +26,7 @@ COSTOS = {
         "PRODUCE": {"costo_merma": 4.0},  # q* = 0,43 -> perecedero
         "GROCERY I": {"costo_merma": 0.5},  # q* = 0,86 -> no perece
     },
-    "politica": {"tope_multiplo_media": 5.0},
+    "politica": {"tope_multiplo_media": 5.0, "decimales": 2, "pedido_minimo": 0.5},
 }
 
 MODELO = {"pronostico": {"cuantiles": CUANTILES}}
@@ -180,6 +180,36 @@ def test_sin_tope_configurado_no_se_recorta():
 
     pedido = _pedido(sin_tope, desbocado)
     assert not pedido["tope_aplicado"].any()
+
+
+# ---------------------------------------------------------------------------
+# Cantidades despachables
+# ---------------------------------------------------------------------------
+
+
+def test_una_cantidad_irrisoria_se_convierte_en_no_reponer():
+    """Un pronóstico puede dar 0,0000000026 unidades en una serie de rotación
+    casi nula. Publicarlo sería presentar ruido numérico como una decisión."""
+    minusculo = _pronostico(familias=("GROCERY I",), dias=1)
+    minusculo.loc[:, ["q0.5", "q0.8", "q0.9", "q0.95"]] = 2.6e-09
+
+    pedido = _pedido(pronostico=minusculo)
+    assert pedido["pedido_sugerido"].iloc[0] == 0.0
+
+
+def test_la_cantidad_se_publica_con_decimales_acotados():
+    pedido = _pedido()
+    decimales = pedido["pedido_sugerido"].map(lambda v: len(str(v).split(".")[-1]))
+    assert (decimales <= 2).all()
+
+
+def test_no_se_redondea_a_entero():
+    """Buena parte del catálogo se vende por peso: el histórico tiene 462.113
+    ventas con decimales, y forzar enteros distorsionaría los frescos."""
+    fraccionado = _pronostico(familias=("PRODUCE",), dias=1)
+    fraccionado.loc[:, ["q0.5", "q0.8", "q0.9", "q0.95"]] = 12.34
+
+    assert _pedido(pronostico=fraccionado)["pedido_sugerido"].iloc[0] == pytest.approx(12.34)
 
 
 # ---------------------------------------------------------------------------

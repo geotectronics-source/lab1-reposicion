@@ -72,3 +72,14 @@ politica:
   # venta media reciente. Protege contra un pronóstico desbocado por un dato
   # anómalo que haya pasado la validación.
   tope_multiplo_media: 5.0
+
+  # Decimales con los que se publica la cantidad. No se redondea a entero
+  # porque buena parte del catálogo se vende por peso: el dataset tiene
+  # 462.113 registros de venta con decimales.
+  decimales: 2
+
+  # Por debajo de esta cantidad no se repone: no compensa mover producto.
+  # Sin este mínimo el modelo publica sugerencias como 0,0000000026 unidades
+  # para series de rotación casi nula, que son ruido numérico presentado como
+  # una decisión de negocio.
+  pedido_minimo: 0.5

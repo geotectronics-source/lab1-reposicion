@@ -95,7 +95,30 @@ def calcular_pedido(
         salida.loc[bloque.index, "pedido_sugerido"] = bloque[f"q{elegido}"].to_numpy()
 
     salida["pedido_sugerido"] = salida["pedido_sugerido"].clip(lower=0.0)
-    return _aplicar_tope(salida, politica)
+    return _normalizar_cantidades(_aplicar_tope(salida, politica), politica)
+
+
+def _normalizar_cantidades(pedido: pd.DataFrame, politica: dict) -> pd.DataFrame:
+    """Convierte el número del modelo en una cantidad que se pueda despachar.
+
+    Un pronóstico puede dar 0,0000000026 unidades para una serie de rotación
+    casi nula. Publicarlo sería presentar ruido numérico como una decisión de
+    negocio: nadie despacha esa cantidad y ensucia el pedido con miles de
+    líneas sin contenido.
+
+    No se redondea a entero porque buena parte del catálogo se vende por peso
+    —el histórico tiene 462.113 ventas con decimales—, así que forzar enteros
+    distorsionaría las familias de frescos.
+    """
+    minimo = politica.get("pedido_minimo")
+    if minimo is not None:
+        pedido.loc[pedido["pedido_sugerido"] < float(minimo), "pedido_sugerido"] = 0.0
+
+    decimales = politica.get("decimales")
+    if decimales is not None:
+        pedido["pedido_sugerido"] = pedido["pedido_sugerido"].round(int(decimales))
+
+    return pedido
 
 
 def _aplicar_tope(pedido: pd.DataFrame, politica: dict) -> pd.DataFrame:

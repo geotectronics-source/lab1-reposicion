@@ -33,7 +33,7 @@ def _fuentes_del_producto() -> list[Path]:
 
 
 @pytest.mark.skipif(shutil.which("git") is None, reason="requiere git")
-def test_todo_el_codigo_fuente_esta_versionado():
+def test_ningun_archivo_de_codigo_esta_excluido_por_gitignore():
     """Regresión: un patrón sin anclar en .gitignore borró un paquete entero.
 
     La regla `models/`, pensada para los modelos entrenados de la raíz,
@@ -42,31 +42,36 @@ def test_todo_el_codigo_fuente_esta_versionado():
     en la máquina de desarrollo todo seguía funcionando porque los archivos
     estaban en disco, y sólo un clon limpio podía detectarlo.
 
-    Las rutas de datos van ahora ancladas con barra inicial, y esta prueba
-    vigila que ningún archivo de `src/` ni de `dags/` quede fuera.
+    Se comprueba la exclusión y no el seguimiento. Un archivo recién creado y
+    todavía sin añadir es normal mientras se trabaja; uno **ignorado** nunca
+    lo es, porque jamás llegará al repositorio aunque se intente añadirlo.
     """
+    archivos = [
+        ruta
+        for directorio in ("src", "dags", "tests")
+        for ruta in (RAIZ / directorio).rglob("*.py")
+        if "__pycache__" not in ruta.parts
+    ]
+    if not archivos:
+        pytest.skip("no hay código que comprobar")
+
+    # `check-ignore` devuelve en stdout sólo las rutas que están ignoradas.
     resultado = subprocess.run(
-        ["git", "ls-files", "src", "dags", "tests"],
+        ["git", "check-ignore", "--no-index", *[str(p) for p in archivos]],
         cwd=RAIZ,
         capture_output=True,
         text=True,
         check=False,
     )
-    if resultado.returncode != 0:
+    # Código 0: hay ignorados. 1: no hay ninguno. 128: no es un repositorio.
+    if resultado.returncode == 128:
         pytest.skip("el directorio no es un repositorio git")
 
-    versionados = {RAIZ / linea for linea in resultado.stdout.splitlines() if linea}
-    en_disco = {
-        ruta
-        for directorio in ("src", "dags", "tests")
-        for ruta in (RAIZ / directorio).rglob("*.py")
-        if "__pycache__" not in ruta.parts
-    }
-
-    faltantes = sorted(str(p.relative_to(RAIZ)) for p in en_disco - versionados)
-    assert not faltantes, (
-        f"Código fuente ausente del repositorio: {faltantes}. "
-        "Revisa .gitignore: un patrón sin barra inicial coincide a cualquier nivel."
+    ignorados = sorted(linea for linea in resultado.stdout.splitlines() if linea)
+    assert not ignorados, (
+        f"Código fuente excluido por .gitignore: {ignorados}. "
+        "Un patrón sin barra inicial coincide a cualquier nivel: "
+        "`models/` también afecta a `src/reposicion/models/`."
     )
 
 
