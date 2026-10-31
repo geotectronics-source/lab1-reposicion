@@ -145,6 +145,12 @@ $ git log --oneline -S'asof: "2017-08-14"' -- config/pipeline.yaml
 Buscar por el *contenido* del parámetro (`git log -S`) y no por la fecha del commit es a propósito:
 la fecha lógica es un dato versionado, así que el propio Git sabe cuándo cambió.
 
+> **Si acabas de clonar el repositorio, no tienes la caché.** El remoto de DVC es una carpeta
+> local —ver [El remoto](#el-remoto)—, así que `dvc pull` y `dvc checkout` no traerán nada. El
+> camino equivalente es poner los CSV de Kaggle en `data/kaggle/` y regenerar con `dvc repro`, que
+> reconstruye desde el origen en vez de recuperar. Cuesta tiempo: la etapa `modelo` tarda unos seis
+> minutos en un portátil y casi diez veces eso dentro del contenedor.
+
 ### Paso 1 — volver al commit de esa emisión
 
 ```console
@@ -416,6 +422,33 @@ lógica, pero no ejecutan nada: un DAG puede pasarlas y fallar al importarse. De
 `libgomp` en [`DECISIONES.md` §3.6](DECISIONES.md)—, y por eso esta orden es parte de la puesta en
 marcha y no un extra.
 
+### Dejarlos operativos
+
+Los cuatro DAGs **llegan pausados**. Lo fija `DAGS_ARE_PAUSED_AT_CREATION: 'true'` en el compose y
+es deliberado: desplegar un flujo no debería ponerlo a correr solo, porque la primera corrida de un
+DAG diario en una máquina recién levantada es justo la que nadie está mirando.
+
+La contrapartida es que hay que habilitarlos, y olvidarlo no se nota:
+
+```bash
+docker compose exec airflow-scheduler bash -c '
+  for d in ingesta_fuentes forecast_pedido reentrenamiento seguimiento_desempeno; do
+    airflow dags unpause $d
+  done'
+```
+
+**Si se omite, `airflow backfill create` no falla.** Imprime `Created backfill Dag run`, sale con
+código 0, y la corrida se queda en `queued` indefinidamente sin un error en ninguna parte. Medido
+sobre una fecha lógica nueva: con el DAG pausado la corrida nunca arranca; al despausarlo, esa
+misma corrida pasa a `success` sin tocar nada más. Es el modo de fallo más caro que tiene este
+proyecto —el éxito silencioso— y está justo en la puesta en marcha.
+
+Para confirmar que quedaron activos, la columna `is_paused` debe decir `False` en los cuatro:
+
+```bash
+docker compose exec airflow-scheduler airflow dags list
+```
+
 ### Los cuatro DAGs
 
 Uno por cadencia real. Ninguno existe para rellenar un hueco del enunciado.
@@ -435,6 +468,26 @@ confirmar lo que ya operaba.
 **Por qué el panel vive en el reentrenamiento y no en un DAG diario.** El panel sólo lo consume
 la validación. Construirlo cada mañana serían cinco minutos diarios para un consumidor mensual;
 el pronóstico no lo necesita, porque calcula sus propias variables sobre el almacén.
+
+**Por qué la ventana es fija y el corte no.** [`dags/comun.py`](dags/comun.py) fija
+`start_date` en 2017-07-01 y `end_date` en 2017-09-02, mientras que `corte_historico: null` deriva
+el corte de los datos para adaptarse a un periodo no publicado. Las dos decisiones tiran en
+direcciones opuestas, así que conviene saber qué limita exactamente cada una:
+
+| | programación automática | `backfill create` |
+|---|---|---|
+| dentro de la ventana | crea corridas | crea corridas |
+| fuera de la ventana | **no crea nada** | **las crea y se ejecutan** |
+
+Comprobado: un backfill del 2017-09-10, ocho días después de `end_date`, creó sus corridas y las
+ejecutó. El `end_date` sólo limita al planificador, que es para lo que está: sin él, un DAG diario
+con fecha de inicio en 2017 crearía miles de corridas hasta hoy sobre una bandeja que no tiene nada
+que entregar.
+
+La consecuencia práctica es que **operar sobre cualquier periodo se hace por backfill**, que es
+además lo que pide el enunciado. Si el histórico aportado llega más lejos que el público, la
+bandeja se adapta sola y el backfill también; lo único que no se adaptaría es el disparo
+automático, que en una evaluación no interviene.
 
 ### Dos relojes: la emisión y el modelo
 
