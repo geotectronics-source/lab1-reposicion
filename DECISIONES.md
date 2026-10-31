@@ -561,6 +561,55 @@ pasar.
 Hay dos pruebas que lo vigilan en cada `pytest`: una comprueba que ningún `.py` esté ignorado y
 la otra que ningún dato esté versionado.
 
+### 2.9 Normalizar los finales de línea invalidó el lock, y es culpa del diseño de §2.3
+
+Error cometido en este proyecto, no hipotético.
+
+El commit que normalizó los finales de línea a LF tocó dos archivos de `src/reposicion/` —`io.py`
+y `registro.py`— sin cambiar una sola instrucción: `git diff --ignore-cr-at-eol` sale vacío. Pero
+**`src/reposicion` es dependencia declarada de cinco etapas** (§2.3), y DVC hashea el contenido
+de los archivos, no su significado. Al cambiar los bytes cambió el hash del directorio, y
+`dvc status` quedó así:
+
+```
+ingesta:
+	changed deps:
+		modified:           src\reposicion
+```
+
+El commit normalizó también `dvc.lock`, de modo que el archivo parecía atendido. No lo estaba: el
+lock seguía describiendo el hash del código **anterior** a la normalización, y por tanto afirmaba
+que unas salidas correspondían a un código que ya no estaba en el repositorio. Es exactamente la
+situación que §2.3 pretendía evitar.
+
+#### Las dos reparaciones, y por qué una no vale
+
+- **`dvc commit`** registra el estado actual de dependencias y salidas en el lock sin ejecutar
+  nada. Habría tardado un segundo y habría sido defendible en voz alta —«sólo cambiaron los
+  finales de línea, las salidas siguen valiendo»— pero es una **afirmación**, no una
+  demostración: el lock pasaría a declarar un hash que nadie ha comprobado que este código
+  produzca. Todo el valor del requerimiento 2 depende de que el lock no afirme nada que no se
+  pueda regenerar.
+- **`dvc repro`** vuelve a ejecutarlo todo. Cuesta unos veinte minutos y deja el lock *ganado*.
+
+Se eligió la segunda, y de paso contestó una pregunta que la primera habría dejado abierta: tras
+regenerar, **las salidas vuelven a tener exactamente los mismos hashes**. Eso demuestra que los
+finales de línea del código fuente no alteran el resultado, que es lo que la vía rápida habría
+dado por supuesto.
+
+#### Lo que hay que llevarse
+
+§2.3 declaró el costo de la dependencia gruesa sobre `src/reposicion` en abstracto: «tocar
+`policy.py` invalida también el entrenamiento, que no lo necesita». Aquí está el costo en
+concreto, y en su forma más incómoda: **un cambio de espacios en blanco invalida el pipeline
+entero**. La decisión sigue siendo la correcta —un lock que miente anula el motivo de usar DVC—
+pero conviene saber lo que se paga.
+
+Y la regla práctica, que es nueva: **cualquier cambio masivo y mecánico sobre archivos que DVC
+hashea exige `dvc repro` en el mismo commit.** Un reformateo, un cambio de finales de línea o un
+renombrado de variables no son «cambios inocuos» para una herramienta que compara bytes. Si el
+commit de normalización hubiera llevado el `dvc repro` dentro, no habría habido nada que
+reparar.
 ---
 
 ## 3. Orquestación con Airflow 3
