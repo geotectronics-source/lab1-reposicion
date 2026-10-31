@@ -4,6 +4,21 @@ Registro de las decisiones que no se deducen leyendo el código: qué se eligió
 y por qué. Donde hay números, salen de medir sobre los datos reales del proyecto, no de la
 intuición ni de la costumbre.
 
+El orden es el de las fases en que se tomaron, no el de lectura. Para entender el producto de
+abajo arriba, el camino es **4 → 5 → 6 → 7 → 0 → 1 → 2 → 3**: primero de dónde vienen los datos,
+después qué modelo opera y por qué, y al final cómo se versiona y se orquesta.
+
+| § | Sobre qué | Lo que contesta |
+|---|---|---|
+| [0](#0-los-tres-modelos-y-por-qué-gana-el-que-gana) | los tres modelos | por qué gana el que gana, y por qué el criterio mide dinero |
+| [1](#1-deep-learning-evaluado-y-descartado) | deep learning | por qué se evaluó y se descartó, con cuatro evidencias |
+| [2](#2-versionamiento-de-datos-y-reproducibilidad-con-dvc) | DVC | cómo se reproduce un pronóstico pasado |
+| [3](#3-orquestación-con-airflow-3) | Airflow | cómo se opera, y qué destapó operarlo de verdad |
+| [4](#4-la-bandeja-el-tiempo-de-llegada-va-en-la-ruta) | la bandeja | cómo se separa «a qué día se refiere» de «cuándo lo supimos» |
+| [5](#5-contratos-de-datos-tres-niveles-de-severidad) | contratos | qué es un dato inválido y qué es una situación de negocio |
+| [6](#6-ingesta-todo-o-nada-una-fecha-por-run) | ingesta | por qué una partición es todo-o-nada |
+| [7](#7-variables-explicativas-hay-dos-fugas-no-una) | variables | las dos fugas temporales, y por qué una no da error |
+
 ---
 
 ## 0. Los tres modelos y por qué gana el que gana
@@ -921,3 +936,269 @@ de las últimas cuatro contra el baremo, o la pendiente— y no se implementó p
 cinco emisiones no hay con qué estimar una pendiente, y el reentrenamiento mensual ya vuelve a
 fijar el baremo antes de que una tendencia tenga tiempo de consolidarse. Queda anotado como lo
 primero que haría falta si el producto operara un año.
+
+---
+
+## 4. La bandeja: el tiempo de llegada va en la ruta
+
+El sistema de origen simulado es la pieza de la que depende todo lo demás, porque es la que hace
+que la corrección punto-en-el-tiempo sea comprobable en vez de prometida.
+
+### 4.1 `date` y `arrival_date` son dos tiempos, y la ruta los separa
+
+```
+landing/arrival_date=2017-07-06/sales/sales_2017-07-05.csv
+                     ^ cuándo lo supimos      ^ a qué día se refiere
+```
+
+Filtrar por `date <= D` parece correcto y **es** fuga temporal: el 6 de julio no se conocen
+todavía las ventas del 6. Llevando la fecha de llegada en la ruta, la lectura point-in-time se
+convierte en un filtro de carpetas en lugar de un acto de disciplina del programador, y un
+descuido deja de ser posible.
+
+**Alternativa descartada: una columna `arrival_date` dentro del CSV.** Se rechazó por dos
+motivos. Un sistema de origen real no declara cuándo te envió un archivo —eso lo sabe el
+receptor, por cuándo lo recibió—, y además obligaría a abrir y leer cada archivo para saber si
+corresponde al periodo, en lugar de decidirlo por el nombre de la carpeta.
+
+Las dos zonas se organizan al revés a propósito: la bandeja por fecha
+(`arrival_date=D/fuente/`), porque así deposita un sistema real que entrega lo del día; el
+almacén por fuente (`fuente/arrival_date=D/`), porque así se consulta.
+
+### 4.2 Latencias asimétricas, puestas a propósito
+
+| fuente | tipo | latencia | por qué |
+|---|---|---|---|
+| `sales` | hecho diario | D+1 | se cierran de madrugada y se transmiten al día siguiente |
+| `transactions` | hecho diario | **D+2** | el POS central consolida más lento |
+| `oil` | hecho diario | D+1 | sólo días hábiles: los huecos son esperados |
+| `holidays_events` | catálogo | cada 30 d | con 60 de anticipación: la única fuente que informa del futuro |
+| `stores` | catálogo estático | — | sólo carga inicial |
+
+Que `transactions` vaya un día por detrás de `sales` **no es realismo decorativo**: obliga al
+producto a tolerar que en la fecha de emisión una fuente esté más atrasada que otra. Un diseño
+que asumiera latencia uniforme funcionaría en la simulación y se rompería contra un origen real
+el primer día. La tarea `auditar` tiene un umbral distinto por fuente justamente por esto.
+
+`holidays_events` merece su propia nota: es la única fuente cuyo último dato está en el **futuro**
+de la fecha lógica. Por eso un pronóstico puede usar feriados que aún no han ocurrido sin violar
+el INVARIANTE 1 —ya se sabían— y por eso su retraso, medido como `asof − último dato`, sale
+negativo y se recorta a cero.
+
+### 4.3 El corte histórico se deriva, no se fija
+
+`corte_historico: null` en `config/sources.yaml`, calculado como *(última venta −
+`dias_operacion`)*, con `dias_operacion: 46`. Con los datos públicos de Kaggle da 2017-06-30.
+
+El enunciado advierte que el flujo se ejecutará sobre un periodo de datos **no publicado**. Un
+corte fijo en `2017-06-30` dejaría la bandeja vacía o desalineada si los CSV del evaluador llegan
+más lejos que los públicos. Derivarlo es lo que hace que el proyecto funcione sobre datos que no
+he visto, que es la condición que de verdad hay que cumplir.
+
+### 4.4 Los incidentes se inyectan para poder demostrar que se resisten
+
+Dos situaciones declaradas en `config/sources.yaml`, no accidentes:
+
+1. **Corrección retroactiva.** El POS de la tienda 44 reporta ceros el 2017-07-05 y el dato real
+   se reenvía el 2017-07-20, cuando el pronóstico de esa semana ya se publicó. El archivo queda
+   en **dos** `arrival_date` distintos: la corrección se añade, no sobrescribe (INVARIANTE 4).
+2. **Fuente que no llega.** `transactions` no entrega el 2017-07-25 y se acumula al día
+   siguiente. Es una situación de negocio y no debe hacer fallar el DAG (INVARIANTE 5).
+
+Las dos están medidas en operación en la sección de Airflow del README: el run del 25 terminó en
+verde y el del 26 recibió 108 filas —las dos entregas acumuladas—, y el reporte del 20 de julio
+distingue 1.782 filas reenviadas de 30 corregidas de verdad.
+
+### 4.5 El simulador no es parte del producto
+
+`tools/build_landing.py` es el único código autorizado a escribir en `landing/`, y vive fuera de
+`src/` a propósito. `landing/` representa el sistema de la empresa: el producto **lo lee y jamás
+lo escribe** (INVARIANTE 2). Hay una prueba que falla si algo de `src/` o `dags/` abre esa ruta
+en modo escritura.
+
+La tensión que esto crea con DVC está resuelta en §2.4: el simulador es la etapa 0 del pipeline,
+para que la cadena sea reproducible desde los CSV públicos y las latencias declaradas se puedan
+comprobar en vez de creer.
+
+---
+
+## 5. Contratos de datos: tres niveles de severidad
+
+### 5.1 El contrato salió del perfilado, no de la intuición
+
+Antes de escribir un solo `Check` se perfilaron las cinco fuentes. Cinco hallazgos cambiaron el
+diseño, y cada uno habría causado un fallo concreto si se hubiera supuesto lo contrario:
+
+| hallazgo | consecuencia en el contrato | qué habría pasado sin él |
+|---|---|---|
+| `oil` tiene **43 nulos**, el primero en la fila 1 | `nullable=True` | el DAG fallaría todos los lunes: el petróleo no cotiza el fin de semana |
+| `holidays`: **31 fechas con varias filas** | la clave es la tupla de 5 campos, no `date` | deduplicar por fecha perdería los feriados regionales, que explican los picos de una ciudad |
+| `transactions` **no** es rejilla completa (83.488 de 90.828) | la ausencia de una tienda es negocio | una tienda cerrada un día tumbaría la ingesta |
+| `sales` es rejilla perfecta: 0 nulos, 0 negativos, 0 duplicados | aquí la clave primaria sí es invariante duro | una PK duplicada pasaría sin avisar |
+| `sales` tiene **462.113 valores decimales** | tipo `float`, no `int` | redondear distorsionaría las familias que se venden por peso |
+
+### 5.2 Estructura sí, vocabulario no
+
+El INVARIANTE 5 exige distinguir dato inválido de situación de negocio. Se concreta en tres
+niveles:
+
+| nivel | ejemplo | acción |
+|---|---|---|
+| estructura | falta una columna, fecha ilegible, PK duplicada | cuarentena + la tarea falla |
+| valor imposible | venta negativa, petróleo a precio negativo | cuarentena + la tarea falla |
+| vocabulario nuevo | tienda 99, tipo de feriado no visto | **avisa y procesa** |
+
+**Decisión deliberada: no se usa `Check.isin([...])` sobre `type` ni `locale`.** Si el evaluador
+aporta un feriado de un tipo que no estaba en los datos públicos, un vocabulario cerrado tumbaría
+el DAG por una situación perfectamente normal. Se exige la estructura del dato, no el vocabulario
+del negocio: el negocio puede abrir una tienda o inventarse un feriado sin pedirnos permiso.
+
+**Regla que ordena los nulos:** las columnas de la clave de negocio y la variable objetivo no los
+admiten, porque sin ellas no hay nada que calcular y no se pueden imputar sin inventar. Las
+variables explicativas sí, y se imputan aguas abajo de forma documentada.
+
+### 5.3 Las correcciones se resuelven al leer, no al recibir
+
+`vista_vigente` aplica *last-write-wins* por `arrival_date` en el momento de la lectura, en vez de
+sobrescribir cuando llega la corrección. Sobrescribir sería más simple de implementar y haría
+**imposible** auditar qué se sabía antes:
+
+```
+historial_de(df, "sales", date="2017-07-05", store_nbr=44)
+
+arrival_date   filas   suma_ventas
+2017-07-06        33         0.000     <- lo que supimos primero
+2017-07-20        33    46,791.723     <- la corrección
+```
+
+Las dos filas conviven. La vigente es la segunda, y la primera sigue ahí para contestar «¿con qué
+datos publicamos el pedido de esa semana?» meses después. Es el INVARIANTE 4, y la operación lo
+ejercita de verdad: el pronóstico del 2017-07-17 se emitió con los ceros, porque el 17 de julio
+los ceros eran lo que se sabía.
+
+---
+
+## 6. Ingesta: todo-o-nada, una fecha por run
+
+### 6.1 ¿Por qué copiar si la bandeja ya tiene los datos?
+
+| razón | detalle |
+|---|---|
+| formato | CSV no preserva tipos; Parquet sí, y se lee mucho más rápido |
+| garantía | lo que está en `data/raw/` ya pasó el contrato; lo de `landing/` no se sabe |
+| propiedad | `landing/` es externo y no se versiona; `data/raw/` es nuestro y va a DVC |
+| desacople | si el origen cambia de formato, sólo cambia la ingesta |
+
+### 6.2 La partición es todo-o-nada
+
+Si uno de los archivos de la fecha es inválido **no se escribe ninguno**, ni siquiera los
+válidos.
+
+Una partición parcial *parece* completa y no lo es: contamina en silencio, y eso es peor que
+caerse. Hay prueba de que `data/raw/sales` ni siquiera llega a existir tras un rechazo.
+
+**Alternativa descartada: escribir lo bueno y fallar.** Además de la contaminación, rompería la
+idempotencia: al reprocesar tras la corrección, la partición tendría que *fusionarse* con lo
+escrito antes en lugar de reescribirse entera, y el INVARIANTE 3 dejaría de valer.
+
+### 6.3 Una sola fecha por ejecución
+
+La ingesta del día D procesa `arrival_date == D`, no `<= D`. Cada run toca exactamente una
+partición, así que repetirlo reescribe lo mismo y un backfill es un run por día **en cualquier
+orden**. Hay prueba de que ingerir hacia adelante y hacia atrás produce DataFrames idénticos.
+
+Esta decisión es la que hace que los reintentos de Airflow sean seguros sin pensar (§3.1) y la
+que permitió correr 33 días de backfill sin coordinación entre runs.
+
+El modo completo que usa DVC —rehacer todo lo llegado hasta `asof`— convive con este: la
+diferencia y su tensión con el grafo están en §3.13.
+
+### 6.4 El histórico es la partición más antigua
+
+Se materializa con `arrival_date = 1900-01-01` en lugar de tratarse como un caso especial. Así
+`leer_raw_asof` lo recoge como a cualquier otra partición y **ningún módulo aguas abajo necesita
+saber que existe una carga inicial**. Un `if es_historico` en la lectura se habría propagado a
+todas las fases siguientes.
+
+### 6.5 Las fuentes ingeribles se derivan de los contratos
+
+`FUENTES = tuple(sorted(ESQUEMAS))`, en vez de repetir la lista en un YAML. Evita el fallo de
+que una fuente entre al almacén sin validarse porque alguien la añadió en un sitio y no en el
+otro. La misma idea aparece en el catálogo de modelos de la CLI, que se construye leyendo el
+nombre de cada clase en lugar de repetirlo.
+
+---
+
+## 7. Variables explicativas: hay dos fugas, no una
+
+### 7.1 La distinción
+
+| fuga | qué es | dónde se resuelve |
+|---|---|---|
+| de disponibilidad | usar un dato que aún no había llegado | la bandeja y `arrival_date` (§4) |
+| **de ventana** | usar el valor del día que se predice, o posteriores | aquí |
+
+La segunda es la traicionera: no produce un error, produce un modelo **sospechosamente bueno en
+validación** que luego falla en operación. Y no la detecta ninguna prueba de contratos, porque
+los datos son perfectamente válidos; sólo la detecta razonar sobre qué se conoce cuándo.
+
+### 7.2 Anclar al origen y meter el horizonte como variable
+
+El instinto es usar `lag_1`. Al predecir siete días se rompe de inmediato:
+
+```
+lag_1 para h=1  ->  sales[O]     conocido
+lag_1 para h=2  ->  sales[O+1]   es justo lo que se quiere predecir
+```
+
+Así que **todas** las variables de la serie se calculan en el origen y el horizonte entra como
+una variable más:
+
+```
+features(O) + h  ->  predice sales[O + h]
+```
+
+Un solo modelo para los siete días, sin acumulación de error y **sin que ninguna ventana pueda
+alcanzar el futuro por construcción**. Eso último es lo que importa: no se evita la fuga con
+cuidado, se evita porque no hay forma de expresarla.
+
+**El origen se calcula, no se supone**: es la última fecha con ventas disponibles en `asof`. Si
+el sistema de origen se retrasa un día, `h` crece y el resto sigue funcionando. Un origen fijo
+en `asof − 1` habría fallado el primer día que la entrega llegara tarde.
+
+### 7.3 Densificar el calendario, pero no inventar historia
+
+Faltan cuatro fechas en el histórico, y son las cuatro navidades que cubre el dataset
+—2013-12-25, 2014-12-25, 2015-12-25 y 2016-12-25—, cuando cierran todas las tiendas. Sin
+rellenarlas, una ventana de 7 registros abarcaría 8 días naturales y las medias quedarían
+desalineadas del calendario.
+
+Pero el relleno con cero se aplica **sólo desde la primera venta observada de cada serie**.
+Rellenar antes crearía historia para una tienda que no había abierto, hundiría su nivel reciente
+y el pedido saldría sistemáticamente corto justo para las tiendas nuevas, que son las que menos
+margen de error tienen.
+
+### 7.4 Las tres sutilezas del calendario de Favorita
+
+- `transferred=True` → ese día el feriado **no** se celebró: se movió. Marcarlo enseñaría al
+  modelo a esperar una caída en un día laborable normal.
+- `type='Transfer'` → el día al que se trasladó, y ése sí cuenta.
+- `type='Work Day'` → lo contrario de un feriado: un sábado que se trabaja.
+
+El alcance importa igual: un feriado local de Quito marcado como nacional metería ruido en 53
+tiendas para explicar una.
+
+### 7.5 Las promociones futuras no están disponibles, y se dice
+
+El sistema de origen entrega `onpromotion` **junto con las ventas**, con la misma latencia D+1.
+En una cadena real vendrían del sistema de planificación comercial con semanas de antelación, y
+serían una de las variables más útiles del modelo.
+
+Aquí sólo se usa la **intensidad promocional reciente** como aproximación: medias de
+`onpromotion` en las mismas ventanas que las ventas, ancladas al origen. Es una aproximación
+pobre y conviene que esté dicho, porque es la primera mejora que daría el negocio si conectara
+su sistema de planificación: no un modelo mejor, un dato que hoy no llega.
+
+Limitación declarada, no descubierta a posteriori: el modelo no puede anticipar una promoción
+futura. Si operaciones lanza una campaña la semana que viene, el pedido se quedará corto, y eso
+no es un defecto del modelo sino del dato disponible.
