@@ -250,3 +250,34 @@ def test_la_ruta_codifica_la_fecha_de_llegada():
     assert entrega.ruta_relativa.as_posix() == (
         "arrival_date=2017-07-06/sales/sales_2017-07-05.csv"
     )
+
+
+def test_la_bandeja_se_escribe_con_lf_en_cualquier_sistema(tmp_path):
+    """`landing/` es la salida de la etapa 0, y DVC compara bytes.
+
+    `to_csv` traduce el salto de línea al de la plataforma, así que sin fijarlo
+    el mismo simulador producía CRLF en Windows y LF en Linux. El producto no
+    se entera —el CSV se parsea igual— pero el hash de la etapa `bandeja`
+    cambiaba por plataforma, y eso obsoletaba la cadena entera desde el primer
+    eslabón.
+
+    El simulador declara su propia constante en vez de importarla del producto:
+    representa un sistema ajeno y no depende de él (INVARIANTE 2).
+    """
+    from tools.build_landing import escribir_csv
+
+    destino = tmp_path / "sales" / "sales_2017-07-05.csv"
+    escribir_csv(
+        pd.DataFrame(
+            {
+                "date": pd.to_datetime(["2017-07-05", "2017-07-05"]),
+                "store_nbr": [1, 2],
+                "sales": [10.5, 20.0],
+            }
+        ),
+        destino,
+    )
+
+    crudo = destino.read_bytes()
+    assert b"\r" not in crudo, "la bandeja lleva retorno de carro: su hash dependería del sistema"
+    assert crudo.count(b"\n") == 3, "cabecera y dos filas"

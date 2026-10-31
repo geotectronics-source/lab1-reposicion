@@ -640,6 +640,46 @@ Dos consecuencias, ninguna cosmética:
 La corrección es `newline="\n"` y `lineterminator="\n"` explícitos, en una constante con nombre
 —`io.FIN_DE_LINEA`— para que el siguiente escritor que se añada no tenga que acordarse.
 
+#### El simulador tenía el mismo defecto, y es el que más pesa
+
+`tools/build_landing.py` escribe la bandeja con `to_csv` y arrastraba lo mismo: 55 retornos de
+carro en `stores.csv`, 1.783 en un archivo de ventas de un día. El producto no se entera —un CSV
+se parsea igual con cualquier fin de línea— pero **`landing/` es la salida de la etapa
+`bandeja`**, la etapa 0, y DVC compara bytes. El mismo simulador producía un hash distinto por
+plataforma, de modo que la cadena quedaba obsoleta **desde el primer eslabón**: justo lo que
+§2.4 pretendía evitar al meter el simulador dentro del grafo.
+
+El simulador declara su propia constante en vez de importar `io.FIN_DE_LINEA`. Representa un
+sistema ajeno y no depende del producto (INVARIANTE 2); que las dos constantes coincidan es
+correcto, y que vivan separadas también.
+
+Y aquí la medición corrigió lo que yo daba por hecho. Esperaba que corregir el simulador
+obligara a reejecutar la cadena entera, porque `bandeja` está al principio. No fue así:
+
+```
+Running stage 'bandeja':
+Running stage 'ingesta':
+Stage 'panel' didn't change, skipping
+Stage 'validacion' didn't change, skipping
+Stage 'modelo' didn't change, skipping
+Stage 'pronostico' didn't change, skipping
+Stage 'pedido' didn't change, skipping
+```
+
+El cambio se propagó **dos etapas y se detuvo en seco**. `data/raw` volvió con el mismo hash
+—`b99f346b…`— y con eso las cinco etapas siguientes quedaron al día. Dos minutos en vez de
+veinte.
+
+La razón es que **la ingesta es el cortafuegos de la representación**: convierte CSV en Parquet
+tipado, y un fin de línea no sobrevive a esa frontera. Es exactamente lo que §6.1 argumentaba al
+justificar por qué se copia la bandeja a un almacén propio —«si el origen cambia de formato, sólo
+cambia la ingesta»— pero esto ya no es un argumento, es una medición: DVC, comparando contenido,
+enseña dónde muere un cambio de forma.
+
+Dicho de otro modo: el defecto del simulador era real pero **no podía alterar ningún pronóstico**,
+sólo el hash de dos etapas. Se corrigió igual, porque dejarlo habría convertido §2.10 en un
+principio que el propio proyecto viola una etapa más arriba.
+
 #### Por qué la prueba mira a los escritores y no al repositorio
 
 La tentación es comprobar que los archivos de `reportes/` no llevan CR. Daría **siempre verde** y
