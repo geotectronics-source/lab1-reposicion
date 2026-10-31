@@ -1,0 +1,76 @@
+{
+  "alertas": [],
+  "asof": "2017-08-19",
+  "emisiones": [
+    {
+      "baremo": "lgbm_cuantilico validado en 2017-07-17",
+      "cobertura_usada": 0.7661,
+      "costo_realizado": 95.6796,
+      "costo_validado": 113.1168,
+      "cuantil_usado": 0.7606,
+      "emision": "2017-07-17",
+      "estado": "normal",
+      "faltante_unidades": 163127.492321,
+      "lineas": 12474,
+      "publicadas": 12474,
+      "realizado": 1.0,
+      "sobrante_unidades": 769958.6481522
+    },
+    {
+      "baremo": "lgbm_cuantilico validado en 2017-07-17",
+      "cobertura_usada": 0.7178,
+      "costo_realizado": 109.5829,
+      "costo_validado": 113.1168,
+      "cuantil_usado": 0.7606,
+      "emision": "2017-07-24",
+      "estado": "normal",
+      "faltante_unidades": 301287.9977155,
+      "lineas": 12474,
+      "publicadas": 12474,
+      "realizado": 1.0,
+      "sobrante_unidades": 529657.6508925
+    },
+    {
+      "baremo": "lgbm_cuantilico validado en 2017-07-17",
+      "cobertura_usada": 0.781,
+      "costo_realizado": 118.5886,
+      "costo_validado": 113.1168,
+      "cuantil_usado": 0.7606,
+      "emision": "2017-07-31",
+      "estado": "normal",
+      "faltante_unidades": 185107.42892950002,
+      "lineas": 12474,
+      "publicadas": 12474,
+      "realizado": 1.0,
+      "sobrante_unidades": 1065276.872775
+    },
+    {
+      "baremo": "lgbm_cuantilico validado en 2017-08-01",
+      "cobertura_usada": 0.8107,
+      "costo_realizado": 124.8498,
+      "costo_validado": 105.8888,
+      "cuantil_usado": 0.7606,
+      "emision": "2017-08-07",
+      "estado": "normal",
+      "faltante_unidades": 120398.0671015,
+      "lineas": 12474,
+      "publicadas": 12474,
+      "realizado": 1.0,
+      "sobrante_unidades": 1237931.2536278
+    },
+    {
+      "baremo": "lgbm_cuantilico validado en 2017-08-01",
+      "cobertura_usada": 0.6745,
+      "costo_realizado": 86.9482,
+      "costo_validado": 105.8888,
+      "cuantil_usado": 0.7606,
+      "emision": "2017-08-14",
+      "estado": "normal",
+      "faltante_unidades": 63902.620127999995,
+      "lineas": 3564,
+      "publicadas": 12474,
+      "realizado": 0.2857,
+      "sobrante_unidades": 135647.0481082
+    }
+  ]
+}

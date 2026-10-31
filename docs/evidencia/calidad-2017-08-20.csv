@@ -1,0 +1,6 @@
+fuente,particiones,llego_en_asof,filas_en_asof,correcciones_en_asof,filas_vigentes,ultimo_dato,retraso_dias,retraso_tolerado,estado
+holidays_events,3,False,0,0,330,2017-09-29,0,40.0,hueco
+oil,36,False,0,0,1209,2017-08-18,2,6.0,hueco
+sales,47,False,0,0,3000888,2017-08-15,5,4.0,atrasado
+stores,1,False,0,0,54,,,,al dia
+transactions,46,False,0,0,83488,2017-08-15,5,5.0,hueco
