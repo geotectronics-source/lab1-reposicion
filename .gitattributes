@@ -1,0 +1,33 @@
+# =============================================================================
+# Finales de línea
+# =============================================================================
+# El mismo repositorio se edita en Windows, se prueba en el CI sobre Ubuntu y
+# Windows, y se ejecuta dentro de contenedores Linux. Sin esta declaración,
+# cada herramienta escribe los finales de línea de su plataforma y el
+# repositorio acaba mezclado: este proyecto llegó a tener nueve archivos con
+# CRLF y el resto con LF, todos committeados.
+#
+# El síntoma no es cosmético. Un archivo que cambia de finales de línea
+# aparece como **modificado por completo** en el diff: una edición de cuatro
+# líneas en `test_cli.py` se presentó como 849 líneas cambiadas, y una revisión
+# así no se puede leer. En un trabajo que se entrega para ser revisado, eso
+# importa.
+#
+# `text=auto eol=lf` hace dos cosas: normaliza a LF en el índice al commitear y
+# escribe LF al hacer checkout. La primera es la que arregla el problema de
+# raíz, porque Git aplica esa normalización también al comparar: una
+# herramienta que reescriba un archivo con CRLF —DVC lo hace con `dvc.lock`
+# cada vez que corre en Windows— ya no aparece como un cambio.
+* text=auto eol=lf
+
+# Los archivos de Windows que de verdad necesitan CRLF.
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# Binarios: que Git no intente tocarlos nunca.
+*.parquet binary
+*.pkl binary
+*.png binary
+*.jpg binary
+*.pdf binary
+*.xlsx binary
