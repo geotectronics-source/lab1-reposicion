@@ -159,7 +159,12 @@ def test_el_producto_no_escribe_en_la_bandeja():
 
 def test_el_producto_no_usa_rutas_absolutas():
     """El mismo código corre en Windows, en Linux y dentro del contenedor."""
-    sospechosas = ("C:\\\\", "C:/", "/home/", "/Users/")
+    # `/opt/` entra en la lista por la fase de Airflow: la raíz dentro del
+    # contenedor es `/opt/proyecto`, y escribirla en un DAG —aunque sea como
+    # valor por defecto— crearía una segunda fuente de verdad que ganaría el
+    # día que alguien cambiara el volumen del compose. La ruta se exporta una
+    # sola vez, como `REPOSICION_HOME`.
+    sospechosas = ("C:\\\\", "C:/", "/home/", "/Users/", "/opt/")
     infractores = [
         f"{ruta.relative_to(RAIZ)}:{numero}: {linea.strip()}"
         for ruta in _fuentes_del_producto()
@@ -259,3 +264,20 @@ def test_ninguna_etapa_consulta_la_fecha_del_sistema():
         if "reposicion" in etapa["cmd"] and "--asof" not in etapa["cmd"]
     ]
     assert not sin_fecha, f"Etapas sin fecha logica explicita: {sin_fecha}."
+
+
+def test_la_ruta_del_contenedor_se_declara_una_sola_vez():
+    """El compose es el único sitio que sabe dónde se monta el repositorio.
+
+    Contrapartida de la prueba anterior: si `/opt/` no puede aparecer en el
+    código, alguien tiene que decir la ruta, y ese alguien es el archivo que
+    crea el volumen. Sin esta comprobación, prohibirla en el código sólo
+    garantizaría que no está escrita en ningún sitio.
+    """
+    compose = (RAIZ / "docker" / "docker-compose.yml").read_text(encoding="utf-8")
+
+    assert "REPOSICION_HOME: /opt/proyecto" in compose, (
+        "el compose tiene que exportar REPOSICION_HOME: es como el producto "
+        "averigua dónde está montado sin llevar la ruta dentro"
+    )
+    assert "..:/opt/proyecto" in compose, "falta el volumen con el repositorio"

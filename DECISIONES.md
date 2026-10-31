@@ -84,6 +84,24 @@ dispersión entre semillas desaparece. No se hizo porque el modelo no se promuev
 tirada y el costo de cómputo no se justifica; si alguna vez fuera candidato a producción, ese
 sería el primer paso.
 
+**Confirmación posterior, desde la fase 8.** El reentrenamiento que corrió Airflow sobre el panel
+del 2017-08-01 —un panel distinto, generado por otra orquestación— dio al lineal un costo de
+142,95. Son ya tres mediciones independientes:
+
+| panel | costo del lineal | RMSLE del lineal | RMSLE del baseline | ¿gana en costo? |
+|---|---|---|---|---|
+| 2017-07-17 | 166,89 | 0,456 | 0,634 | no |
+| 2017-08-01 | 142,95 | 0,429 | 0,547 | no |
+| 2017-08-14 | 263,06 | 0,434 | 0,507 | no |
+
+El costo se mueve en un rango de 143 a 263 —un 84 % de dispersión— mientras el RMSLE se queda
+clavado entre 0,43 y 0,46. Es exactamente la firma de un modelo que no converge: la calidad
+media del ajuste es estable y el reparto del error entre los dos lados del pedido no lo es.
+
+Y la conclusión que importa aguanta las tres veces: **el lineal gana al baseline en RMSLE y
+pierde en costo de negocio, siempre.** Eso es lo que hace que el criterio de promoción mida
+costo y no error estadístico, y ahora está apoyado en tres paneles en vez de uno.
+
 ### Por qué se conserva el lineal aunque no se promueva
 
 No entra en producción, pero sí en la comparación, por tres motivos:
@@ -528,3 +546,378 @@ pasar.
 Hay dos pruebas que lo vigilan en cada `pytest`: una comprueba que ningún `.py` esté ignorado y
 la otra que ningún dato esté versionado.
 
+---
+
+## 3. Orquestación con Airflow 3
+
+### 3.1 Cuatro DAGs, uno por cadencia
+
+El producto tiene siete etapas y cuatro cadencias distintas: las fuentes llegan a diario, el
+pedido se emite los lunes, el desempeño se mide cada mañana y reentrenar cuesta quince minutos.
+
+Un DAG único habría sido más simple de explicar y peor producto: obligaría a la cadencia más
+fina, de modo que seis de cada siete corridas gastarían quince minutos en reentrenar para
+confirmar lo que ya operaba. Y al revés: un DAG por etapa daría siete grafos de una tarea, con
+siete sitios donde mirar cuando algo falla y ninguna dependencia expresada.
+
+El criterio que se usó: **un DAG por cadencia, y dentro de cada uno las tareas que comparten
+fecha lógica y tienen que pasar o fallar juntas.** De ahí salen cuatro.
+
+Hubo una quinta idea que no sobrevivió: un `preparacion_datos` diario que construyera el panel de
+entrenamiento. Al dibujar las dependencias se vio que el panel sólo lo consume la validación,
+que corre una vez al mes, y que el pronóstico no lo necesita porque calcula sus propias
+variables sobre el almacén. Un DAG diario de cinco minutos para un consumidor mensual. El panel
+pasó a ser la primera tarea del reentrenamiento, que es quien lo usa.
+
+### 3.2 `BashOperator` y no `PythonOperator`: una sola frontera
+
+`PythonOperator` era la opción natural: importar `reposicion`, llamar a la función, mejores
+mensajes de error y objetos por XCom. Se descartó por una razón de arquitectura y no de estilo.
+
+Con `PythonOperator` habría **dos formas de ejecutar el producto**: la de Airflow, que llama a
+funciones, y la de DVC, que llama a la línea de comando. Nada garantizaría que siguen siendo
+equivalentes. El día que alguien añadiera un parámetro en la función y no en la CLI, «lo que se
+reproduce» y «lo que opera» serían cosas distintas y la reproducibilidad del requerimiento 2
+pasaría a ser decorativa.
+
+Con `BashOperator` la frontera es una sola y es **verificable**: hay una prueba que falla si un
+archivo de `dags/` importa `reposicion`. El precio está asumido y declarado: un fallo llega como
+código de salida y un traceback en el log, no como una excepción de Python en la interfaz.
+
+### 3.3 Airflow no llama a `dvc repro`
+
+Parecía elegante —el pipeline ya está declarado, que lo ejecute el orquestador— y es un error por
+dos motivos independientes.
+
+El primero: `dvc repro` **se salta** la etapa cuando su salida ya está al día. Una tarea
+programada tiene que correr cuando le toca, no cuando a la caché le parece; un DAG cuyas tareas
+deciden solas si trabajar es un DAG que no se puede razonar.
+
+El segundo: `dvc repro` escribe `dvc.lock`, que es un archivo de Git. Un orquestador que modifica
+archivos versionados en cada corrida convierte el repositorio en un diario de ejecuciones, y el
+historial deja de contar decisiones para contar cron jobs.
+
+La división queda: **DVC reproduce, Airflow opera, y los dos ejecutan la misma orden.** Esa
+última parte es la que hace que las dos primeras signifiquen algo.
+
+### 3.4 `LocalExecutor` y no `CeleryExecutor`
+
+El `docker-compose.yaml` oficial de Airflow trae Celery, Redis y un contenedor de worker, porque
+está pensado para repartir tareas entre máquinas. Aquí la tarea más cara tarda nueve minutos y no
+hay nada que repartir entre nodos.
+
+Celery habría añadido dos servicios, un broker que puede quedarse colgado y una fuente más de
+«la tarea se quedó en *queued*» sin resolver ningún problema que tengamos. `LocalExecutor`
+ejecuta en subprocesos del planificador y da el paralelismo que sí necesitamos, el de dentro de
+la máquina. Se limita a dos tareas simultáneas porque la etapa del panel levanta dos años de
+ventas en memoria y dos de esas a la vez tumbarían el contenedor.
+
+### 3.5 La imagen lleva las dependencias; el volumen, el código
+
+Tres formas de meter el producto en el contenedor:
+
+1. `_PIP_ADDITIONAL_REQUIREMENTS` en el compose. Instala en cada arranque de cada contenedor; la
+   propia documentación de Airflow dice que es sólo para pruebas rápidas. Tarda minutos cada vez
+   y la versión instalada depende de qué haya en PyPI ese día.
+2. `pip install .` dentro de la imagen. Entonces la imagen lleva una **copia** del código, y «lo
+   que corre Airflow» es la versión que se congeló al construir, no la del commit desplegado.
+   Reconstruir pasaría a ser obligatorio antes de cada prueba.
+3. La imagen lleva las dependencias y **el repositorio se monta como volumen**.
+
+Se eligió la tercera. Las dependencias cambian con `uv.lock`, que es raro, y entonces se
+reconstruye; el código cambia a diario y se lee del mismo árbol de trabajo que Git y DVC están
+versionando. Así «lo que corre Airflow» es, literalmente, el commit que está en el disco.
+
+Las versiones se exportan de `uv.lock` a `docker/requirements.txt`, de modo que el contenedor usa
+exactamente las que se probaron. No es celo innecesario: este proyecto ya se topó cuatro veces
+con que pandas infiere `datetime64[us]` donde el dominio exige `[ns]`, y una versión distinta
+dentro del contenedor reabriría esa clase de diferencia con el pipeline ya corriendo.
+
+### 3.6 `libgomp1`: la dependencia que no estaba en la lista
+
+La primera corrida del DAG de ingesta falló así:
+
+```
+OSError: libgomp.so.1: cannot open shared object file: No such file or directory
+```
+
+LightGBM es C++ y paraleliza con OpenMP: al importarse carga `libgomp.so.1` en tiempo de
+ejecución. `pip install lightgbm` terminó en verde y la tarea murió más tarde.
+
+No apareció antes porque **la rueda de LightGBM para Windows empaqueta el runtime de OpenMP
+dentro del `.whl`**: en el equipo de desarrollo la biblioteca estaba siempre disponible. Es el
+caso de libro de «funciona en mi máquina», y la lección es concreta: una lista de
+dependencias de Python no describe el entorno completo de un paquete con extensiones nativas.
+La imagen instala `libgomp1` con `apt-get` antes de instalar nada de Python.
+
+### 3.7 `catchup=False` y `end_date`: el backfill se pide, no se hereda
+
+El valor por defecto de `catchup` en Airflow es `True`, y es el error caro de la herramienta:
+habilitar un DAG diario con fecha de inicio en 2017 pone al planificador a crear **miles** de
+corridas que nadie pidió, sobre una bandeja que no tiene nada que entregar.
+
+Los cuatro DAGs declaran `catchup=False` y acotan su ventana con `end_date`, porque el sistema
+origen es una simulación que termina el 2017-09-01. Los backfills se piden explícitamente y
+acotados:
+
+```bash
+airflow backfill create --dag-id ingesta_fuentes --from-date 2017-07-18 --to-date 2017-08-21
+```
+
+En un despliegue real se quitaría el `end_date` y `catchup` dejaría de importar, porque la fecha
+lógica sería la de hoy.
+
+Hay una prueba estática que falla si un DAG deja `catchup` sin declarar.
+
+**Trampa del rango, que costó un intento.** `--from-date` y `--to-date` son *instantes*, no días
+de calendario, y el backfill sólo crea los runs cuyo disparo del cron cae dentro. Para el DAG
+mensual, que dispara a las 03:00 del día 1:
+
+```
+--from-date 2017-08-01 --to-date 2017-08-01
+Warning: No runs to create for Dag reentrenamiento in the range [2017-08-01 00:00:00-05:00, ...]
+```
+
+El rango es de medianoche a medianoche y las 03:00 quedan fuera. Hay que pedir
+`--to-date 2017-08-02`. El aviso lo dice, pero es un `Warning` y el comando sale con código 0, de
+modo que un backfill que no hizo nada parece haber funcionado.
+
+### 3.8 El modelo vigente: dos relojes y el filtro punto-en-el-tiempo
+
+El pedido sale cada lunes y el modelo se reentrena una vez al mes. La consecuencia es que **la
+mayoría de los lunes no existe ningún `models/asof=<ese lunes>`**, y la primera versión del
+pronóstico —la que escribió la fase de DVC— exigía exactamente esa carpeta. Funcionaba porque
+DVC entrenaba y emitía en la misma fecha; en operación habría dejado al producto sin emitir seis
+semanas de cada siete.
+
+El arreglo obvio —cargar el último modelo registrado— tiene un defecto peor y más silencioso: un
+backfill de julio usaría el modelo entrenado en agosto, y el pronóstico resultante sería **mejor
+que el que el producto habría podido dar ese día**. El backfill mentiría a su favor, y el
+seguimiento mediría un desempeño que en julio nadie podía conseguir.
+
+La regla que se implementó: *el modelo vigente en `asof` es el más reciente registrado con fecha
+≤ `asof`*. El filtro punto-en-el-tiempo se aplica también al registro de modelos, no sólo a los
+datos.
+
+Lo que hace que no haya dos caminos de código: cuando el pipeline de DVC acaba de entrenar para
+`asof`, esa versión *es* la más reciente ≤ `asof`, de modo que la misma regla devuelve la carpeta
+que DVC declaró como salida. Una regla, dos situaciones.
+
+Detalle que costó una prueba: una versión sólo cuenta si tiene el `.pkl`. Un entrenamiento que
+muere a mitad deja una carpeta con la fecha más reciente, y una búsqueda que sólo mirara nombres
+la elegiría.
+
+### 3.9 El seguimiento no es una etapa de DVC
+
+Hay una etapa del producto que no aparece en `dvc.yaml`, y es la mejor justificación de por qué
+el laboratorio pide las dos herramientas.
+
+La entrada del seguimiento es *«todas las emisiones pasadas cuyo horizonte ya se realizó»*. No es
+una arista fija entre archivos: es una consulta que depende de la fecha en que se corre. DVC
+declara dependencias entre rutas concretas y no tiene forma de expresarla. Un orquestador con
+fecha lógica, sí.
+
+Sus salidas tampoco van a Git. Es un DAG diario: versionar su reporte convertiría el historial en
+un registro de ejecuciones. Las decisiones de promoción sí van a Git porque son raras y se
+revisan en un Pull Request; el monitoreo diario es un dato, no una decisión.
+
+### 3.10 La alerta avisa; no interrumpe
+
+Un modelo que se degrada **no hace fallar el DAG**. Es la aplicación directa del INVARIANTE 5:
+degradarse es una situación de negocio, no un dato inválido.
+
+El argumento concreto, más allá del principio: hacer caer la tarea de medición dejaría al día
+siguiente sin medición, que es exactamente cuando hace falta mirarla. La alerta queda en el log y
+en `desempeno.json`, y reentrenar lo decide una persona.
+
+Lo que sí se dejó fuera, declarado: **escalar la alerta** —disparar el reentrenamiento
+automáticamente, o mandar un correo— no está implementado. No hay SMTP en el laboratorio, y un
+modelo que empeora merece una revisión humana antes de que el sistema se reentrene solo sobre
+los datos que lo degradaron.
+
+### 3.11 Pruebas estáticas de los DAGs: lo que cubren y lo que no
+
+`pytest` tiene que correr sin Airflow (CLAUDE.md §6), así que las pruebas de los DAGs **no los
+importan**: los leen como texto y los analizan con `ast`. Comprueban que ninguno importe el
+producto, que ninguno contenga funciones, condicionales ni bucles, que todos declaren
+`schedule`, `start_date`, `catchup` y `max_active_runs`, que el `dag_id` coincida con el nombre
+del archivo y que ninguno fije una fecha en una orden.
+
+Por qué merece la pena: «los DAGs sólo orquestan» es una regla que se respeta el primer día y se
+erosiona el tercero. Alguien necesita un `if` para saltarse un domingo, luego una función para
+calcular una fecha, y al mes la lógica de negocio vive en dos sitios y sólo uno tiene pruebas.
+Un árbol de sintaxis detecta esa deriva el día que ocurre.
+
+La contrapartida, declarada sin adornos: **estas pruebas no ejecutan nada**. Un DAG puede pasar
+las nueve y fallar al importarse en Airflow —de hecho ocurrió, con `libgomp`. La verificación
+real es `airflow dags list` dentro del contenedor, y está documentada en el README como parte de
+la puesta en marcha.
+
+### 3.12 `ds` es UTC y el cron no
+
+Trampa que se revisó antes de que diera problemas. El cron se interpreta en la zona de
+`DEFAULT_TIMEZONE` (America/Guayaquil, UTC−5), mientras que `{{ ds }}` es la fecha lógica **en
+UTC**. El backfill lo confirma: la corrida del 19 de agosto tiene `logical_date` a las 11:00 UTC,
+que son las 06:00 de Guayaquil.
+
+Las cuatro programaciones del proyecto están de madrugada o por la mañana, así que al pasar a UTC
+siguen cayendo en el mismo día del calendario. Un cron de las 20:00 locales serían las 01:00 UTC
+del día siguiente y `ds` adelantaría un día **sin avisar**, que es una forma silenciosa de
+romper la corrección punto-en-el-tiempo: el pedido del lunes se calcularía con la fecha lógica
+del martes.
+
+### 3.13 El almacén es acumulativo, y eso tensiona el grafo de DVC
+
+Interacción entre las dos herramientas que conviene tener declarada, porque aparece en cuanto se
+usan juntas de verdad.
+
+La etapa `ingesta` declara `data/raw` como salida. Desde un árbol limpio es una función de sus
+entradas: `ingesta --asof D` produce exactamente las llegadas ≤ D, y el hash que registra
+`dvc.lock` es reproducible.
+
+Pero el almacén **acumula por invariante**. `ingesta` no borra nada: el filtro
+punto-en-el-tiempo se aplica al leer y no al escribir, porque borrar lo posterior destruiría el
+histórico que permite auditar (INVARIANTE 4). Cuando Airflow opera —un run por día durante cinco
+semanas— el almacén crece más allá del `asof` que describe `dvc.lock`, y el hash deja de
+coincidir.
+
+No es una contradicción: es que el árbol de trabajo ya no es el que el lock describe, igual que
+después de editar un archivo. La vuelta es la que define DVC:
+
+```bash
+dvc checkout            # el almacén vuelve al estado que describe el lock
+dvc repro               # y el pipeline se reproduce desde ahí
+```
+
+Las dos alternativas que se consideraron y por qué no:
+
+- **Que `ingesta` limpie lo posterior a `asof`.** Haría la etapa idempotente respecto al árbol,
+  y rompería el INVARIANTE 4: un backfill de julio borraría lo que se sabe de agosto, y la
+  pregunta «¿qué sabíamos el 15 de julio?» dejaría de tener respuesta en cuanto alguien
+  reprodujera una fecha antigua.
+- **Sacar `data/raw` del grafo** y tratar el almacén como una fuente externa. El pipeline dejaría
+  de ser reproducible de punta a punta, que es justo el requerimiento 2.
+
+Se asume la contrapartida y se documenta el comando. Lo que importa es que el lock nunca
+describa algo que no se pueda regenerar: con `dvc checkout` de por medio, sí se puede.
+
+### 3.14 El contenedor no cuesta lo mismo que el equipo, y conviene medirlo
+
+Tiempos de las tareas del reentrenamiento del 2017-08-01, dentro del contenedor, comparados con
+los de la misma etapa corriendo en Windows sobre el mismo equipo:
+
+| etapa | qué la limita | en Windows | en el contenedor | factor |
+|---|---|---|---|---|
+| `panel` | pandas, un hilo | 5 min 16 s | 4 min 48 s | 0,9× |
+| `validar` | LightGBM, 9 ajustes | 8 min 47 s | 31 min 30 s | 3,6× |
+| `modelo` | LightGBM, panel completo | 35 s | 5 min 40 s | 9,7× |
+
+El patrón es informativo: la etapa que va limitada por pandas tarda lo mismo o menos, y las dos
+que van limitadas por LightGBM tardan entre cuatro y diez veces más. El contenedor no es «más
+lento» en general; lo es para lo que paraleliza.
+
+Que el factor no sea el mismo en las dos etapas de LightGBM —3,6× y 9,7×— es algo que no
+conseguí explicar, y queda dicho: no se aisló la variable.
+
+La causa más probable, y se declara como probable y no como comprobada: **sobresuscripción de
+hilos**. LightGBM crea tantos hilos como núcleos le reporta la máquina virtual de WSL2, y durante
+la medición había además otro Airflow del mismo equipo compitiendo por CPU. El contador marcaba
+1.848 % de uso —unos dieciocho núcleos ocupados— para ir casi cuatro veces más lento, que es la
+firma de hilos peleándose en vez de trabajando.
+
+**No se ajustó**, y el motivo es de producto, no de pereza: la palanca sería fijar
+`OMP_NUM_THREADS` o `num_threads` en el compose, y afirmar que eso lo arregla exige volver a
+medir media hora. La tarea corre una vez al mes a las 03:00; treinta y un minutos ahí no le
+quitan el sueño a nadie. Si pasara a ser semanal, este sería el primer sitio donde mirar.
+
+Lo que sí se deja dicho: **los tiempos de un pipeline no se heredan del equipo de desarrollo.**
+Diseñar la cadencia de un DAG con los números del portátil es cómo se acaba con una tarea
+nocturna que todavía corre a las nueve de la mañana.
+
+### 3.15 La reproducibilidad byte a byte es de una plataforma, no del proyecto
+
+El hallazgo que más matiza lo que afirmaba la fase 7.
+
+El backfill de Airflow regeneró, dentro del contenedor Linux, la misma emisión del 2017-07-17 que
+`dvc.lock` describe con el hash que produjo Windows. **Los hashes no coinciden.**
+
+Antes de escribir nada hubo que averiguar si cambiaban los valores o sólo los bytes del archivo,
+porque las dos cosas significan lo contrario. Midiendo:
+
+| columna | filas que difieren | dif. absoluta máx. | dif. **relativa** máx. |
+|---|---|---|---|
+| `q0.5` | 1.760 de 12.474 (14,1 %) | 1,8 · 10⁻¹² | 3,0 · 10⁻¹⁶ |
+| `q0.8` | 1.739 (13,9 %) | 1,8 · 10⁻¹² | 3,2 · 10⁻¹⁶ |
+| `q0.9` | 1.704 (13,7 %) | 1,8 · 10⁻¹² | 2,7 · 10⁻¹⁶ |
+| `q0.95` | 2.205 (17,7 %) | 1,8 · 10⁻¹² | 2,8 · 10⁻¹⁶ |
+
+Una diferencia relativa de 3 · 10⁻¹⁶ es **un bit**: el épsilon de un `float64` vale
+2,2 · 10⁻¹⁶. Un valor concreto:
+
+```
+windows: 4.129039181173225
+linux:   4.1290391811732245
+```
+
+Es el orden en que se suman los flotantes, que depende de cómo reparta el trabajo la biblioteca
+de álgebra y de cuántos hilos use. No es un defecto del producto ni una diferencia de versiones:
+las dependencias están fijadas desde `uv.lock` y son idénticas.
+
+**Pero el pedido publicado sí es idéntico, bit a bit.** Las 12.474 cantidades, el total de
+6.351.166,32 unidades y las 8 líneas recortadas por el tope coinciden exactamente.
+
+La razón es una decisión de negocio que se tomó por un motivo completamente distinto:
+`politica.decimales: 2` en `costs.yaml` está ahí porque nadie despacha 0,0000000026 unidades, y
+resulta que redondear a dos decimales **absorbe el ruido de la última cifra**. El redondeo que se
+puso para que el pedido fuera despachable es lo que lo hace estable entre plataformas.
+
+#### Qué se afirma y qué no
+
+Esto obliga a precisar la afirmación de la fase 7, que decía «byte a byte» sin decir dónde:
+
+- **La decisión es reproducible entre plataformas**, exactamente. Es la afirmación que le importa
+  al negocio: el pedido que se publicó se puede volver a obtener en cualquier máquina.
+- **El archivo no lo es.** Y como DVC compara hashes de archivos, `dvc repro` en otro sistema
+  operativo dará todas las etapas por obsoletas y volverá a ejecutarlas. No es un fallo del
+  pipeline: es una propiedad de hashear artefactos de coma flotante.
+- La afirmación «byte a byte» de la fase 7 era correcta **en la misma máquina**, que es donde se
+  midió, y eso es lo que hace que `dvc repro` detecte un cambio real de código. No se puede
+  extender a otra plataforma, y ahora está medido en vez de supuesto.
+
+Lo que se haría si el proyecto tuviera que garantizar identidad entre plataformas: materializar
+sólo la decisión redondeada como salida versionada y dejar los cuantiles crudos fuera del hash.
+No se hizo porque los cuantiles crudos son justo lo que necesita el seguimiento para medir
+cobertura, y perderlos costaría más de lo que vale la identidad del archivo.
+
+### 3.16 La alerta mira emisiones, no tendencias
+
+El seguimiento de las cinco emisiones del backfill, medido el 2017-08-19:
+
+| emisión | realizado | costo | validado | cobertura | baremo |
+|---|---|---|---|---|---|
+| 2017-07-17 | 100 % | 95,68 | 113,12 | 76,6 % | validado en 2017-07-17 |
+| 2017-07-24 | 100 % | 109,58 | 113,12 | 71,8 % | validado en 2017-07-17 |
+| 2017-07-31 | 100 % | 118,59 | 113,12 | 78,1 % | validado en 2017-07-17 |
+| 2017-08-07 | 100 % | 124,85 | **105,89** | 81,1 % | validado en 2017-08-01 |
+| 2017-08-14 | 28,6 % | 86,95 | **105,89** | 67,5 % | validado en 2017-08-01 |
+
+Dos cosas funcionan como se diseñaron. El baremo **cambia solo** a partir del 2017-08-07, porque
+`emision.json` dice que esas emisiones las atendió el modelo del 2017-08-01: cada emisión se mide
+contra la promesa del modelo que de verdad la produjo. Y la cobertura se mueve alrededor del 76 %
+que pide la política, entre el 67 % y el 81 %.
+
+**Y una no.** El costo sube cuatro semanas seguidas —95,68 → 109,58 → 118,59 → 124,85, un 30 %— y
+**ninguna emisión dispara la alerta**, porque cada una se compara por separado contra su baremo y
+la peor se queda en +17,9 % sobre una tolerancia del 25 %.
+
+Conviene no sobreinterpretarlo en ninguna de las dos direcciones. Con cuatro puntos no se puede
+distinguir un modelo que se degrada de cuatro semanas que vinieron más difíciles: mediados de
+agosto trae el feriado del Primer Grito de Independencia y un efecto de quincena, y el horizonte
+se mete en ellos. Que no se pueda decidir con estos datos es precisamente el resultado.
+
+Lo que sí queda demostrado es el límite del diseño: **una alerta que mira cada emisión por
+separado no ve una tendencia.** Lo que lo arreglaría es un contraste sobre la ventana —la media
+de las últimas cuatro contra el baremo, o la pendiente— y no se implementó por dos razones: con
+cinco emisiones no hay con qué estimar una pendiente, y el reentrenamiento mensual ya vuelve a
+fijar el baremo antes de que una tendencia tenga tiempo de consolidarse. Queda anotado como lo
+primero que haría falta si el producto operara un año.

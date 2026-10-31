@@ -1,0 +1,204 @@
+# =============================================================================
+# Airflow 3 para el motor de reposición
+# =============================================================================
+# Derivado del `docker-compose.yaml` oficial de Airflow 3.3.2, con tres
+# diferencias deliberadas:
+#
+# 1. **`LocalExecutor` en vez de `CeleryExecutor`.** El oficial trae Redis y
+#    un contenedor de worker aparte porque está pensado para repartir tareas
+#    entre máquinas. Aquí la tarea más cara tarda nueve minutos y no hay nada
+#    que paralelizar entre nodos: Celery añadiría dos servicios, un broker que
+#    puede quedarse colgado y una fuente más de "la tarea se quedó en queued"
+#    sin resolver ningún problema que tengamos. `LocalExecutor` ejecuta en
+#    subprocesos del planificador y sí permite paralelismo dentro de la
+#    máquina, que es el que necesitamos.
+#
+# 2. **Sin DAGs de ejemplo** (`LOAD_EXAMPLES: 'false'`). Con ellos la lista
+#    trae cincuenta DAGs ajenos y los nuestros se pierden; peor, sus corridas
+#    ensucian la base y hacen ilegible la evidencia que hay que entregar.
+#
+# 3. **El repositorio entero se monta en `/opt/proyecto`** y `REPOSICION_HOME`
+#    apunta ahí. Es la única forma de que el contenedor lea la bandeja y
+#    escriba en `data/` sin que el producto tenga una sola ruta absoluta
+#    dentro (CLAUDE.md §2): la ruta la fija el entorno, no el código.
+#
+# -----------------------------------------------------------------------------
+# Airflow no llama a DVC, y es a propósito
+# -----------------------------------------------------------------------------
+# Las tareas invocan `python -m reposicion …`, la misma orden que ejecutan las
+# etapas de `dvc.yaml`. Poner `dvc repro` dentro de una tarea sería un error
+# por dos motivos: DVC se saltaría la etapa cuando su salida ya está al día
+# —y una tarea programada tiene que correr cuando le toca, no cuando a la
+# caché le parece— y además escribiría `dvc.lock`, que es un archivo de Git;
+# un orquestador que modifica archivos versionados en cada corrida convierte
+# el repositorio en un diario de ejecuciones.
+#
+# La división es: **DVC reproduce, Airflow opera, y los dos ejecutan lo
+# mismo.** Esa última parte es la que hace que la reproducibilidad no sea
+# decorativa.
+# =============================================================================
+
+x-reposicion-common: &reposicion-common
+  build:
+    context: .
+    dockerfile: Dockerfile
+  image: reposicion/airflow:3.3.2
+  environment: &reposicion-env
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    AIRFLOW__CORE__AUTH_MANAGER: airflow.providers.fab.auth_manager.fab_auth_manager.FabAuthManager
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
+    AIRFLOW__CORE__FERNET_KEY: ${FERNET_KEY:-}
+    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: 'true'
+    AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
+    AIRFLOW__CORE__EXECUTION_API_SERVER_URL: 'http://airflow-apiserver:8080/execution/'
+    AIRFLOW__API_AUTH__JWT_SECRET: ${AIRFLOW__API_AUTH__JWT_SECRET:-reposicion-lab1}
+    AIRFLOW__SCHEDULER__ENABLE_HEALTH_CHECK: 'true'
+    # Dos tareas a la vez como máximo. No es prudencia genérica: la etapa del
+    # panel levanta dos años de ventas en memoria, y dos de esas a la vez
+    # tumbarían el contenedor en un portátil.
+    AIRFLOW__CORE__PARALLELISM: '2'
+    # Zona horaria de la operación. El negocio es ecuatoriano y las fechas del
+    # dominio no llevan zona (CLAUDE.md §3); fijarla aquí evita que la interfaz
+    # muestre las corridas en UTC y que el `ds` de una tarea no coincida con la
+    # fecha que ve el usuario.
+    AIRFLOW__CORE__DEFAULT_TIMEZONE: America/Guayaquil
+    AIRFLOW__API__DEFAULT_UI_TIMEZONE: America/Guayaquil
+    # Cómo el producto encuentra sus datos dentro del contenedor.
+    REPOSICION_HOME: /opt/proyecto
+    PYTHONPATH: /opt/proyecto/src
+    # Sin esto, el log de la tarea no muestra NADA hasta que la orden termina:
+    # Python bufferiza stdout en bloques de 8 KB cuando no escribe a un
+    # terminal, y una tarea de veinte minutos que no imprime nada es
+    # indistinguible de una colgada. Se descubrió mirando el log del
+    # reentrenamiento sin saber si avanzaba.
+    PYTHONUNBUFFERED: '1'
+  volumes:
+    - ..:/opt/proyecto
+    - ../dags:/opt/airflow/dags
+    - ./logs:/opt/airflow/logs
+  # En Linux, sin esto los archivos que escriba Airflow en el repositorio
+  # quedarían con dueño `root` y el usuario no podría borrarlos. En Windows y
+  # macOS el valor es indiferente porque Docker Desktop traduce los permisos.
+  user: "${AIRFLOW_UID:-50000}:0"
+  depends_on: &reposicion-depends
+    postgres:
+      condition: service_healthy
+
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+      POSTGRES_DB: airflow
+    volumes:
+      - postgres-reposicion:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "airflow"]
+      interval: 10s
+      retries: 5
+      start_period: 5s
+    restart: always
+
+  # Prepara la base y crea el usuario de la interfaz. Corre una vez y termina;
+  # los demás servicios esperan a que haya terminado bien.
+  airflow-init:
+    <<: *reposicion-common
+    entrypoint: /bin/bash
+    command:
+      - -c
+      - |
+        mkdir -p /opt/airflow/logs
+        chown -R "${AIRFLOW_UID:-50000}:0" /opt/airflow/logs
+        exec /entrypoint airflow version
+    environment:
+      <<: *reposicion-env
+      _AIRFLOW_DB_MIGRATE: 'true'
+      _AIRFLOW_WWW_USER_CREATE: 'true'
+      _AIRFLOW_WWW_USER_USERNAME: ${AIRFLOW_WWW_USER:-airflow}
+      _AIRFLOW_WWW_USER_PASSWORD: ${AIRFLOW_WWW_PASSWORD:-airflow}
+    user: "0:0"
+    restart: "no"
+
+  airflow-apiserver:
+    <<: *reposicion-common
+    command: api-server
+    ports:
+      - "${AIRFLOW_PORT:-8080}:8080"
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8080/api/v2/monitor/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    restart: always
+    depends_on:
+      <<: *reposicion-depends
+      airflow-init:
+        condition: service_completed_successfully
+
+  airflow-scheduler:
+    <<: *reposicion-common
+    command: scheduler
+    healthcheck:
+      test: ["CMD-SHELL", 'airflow jobs check --job-type SchedulerJob --hostname "$${HOSTNAME}"']
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    restart: always
+    depends_on:
+      <<: *reposicion-depends
+      airflow-init:
+        condition: service_completed_successfully
+
+  # Servicio propio desde Airflow 3: ya no es el planificador el que importa
+  # los archivos de `dags/`. Un DAG con un error de sintaxis ya no puede
+  # tumbar al planificador, que es exactamente el aislamiento que se quiere.
+  airflow-dag-processor:
+    <<: *reposicion-common
+    command: dag-processor
+    healthcheck:
+      test: ["CMD-SHELL", 'airflow jobs check --job-type DagProcessorJob --hostname "$${HOSTNAME}"']
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    restart: always
+    depends_on:
+      <<: *reposicion-depends
+      airflow-init:
+        condition: service_completed_successfully
+
+  # Ninguna tarea de este proyecto es diferible, así que hoy no hace nada. Se
+  # deja porque es parte del despliegue estándar de Airflow 3 y porque el día
+  # que se añada un sensor —esperar a que la bandeja entregue, por ejemplo—
+  # su ausencia se manifestaría como una tarea colgada para siempre, que es
+  # un síntoma caro de diagnosticar.
+  airflow-triggerer:
+    <<: *reposicion-common
+    command: triggerer
+    healthcheck:
+      test: ["CMD-SHELL", 'airflow jobs check --job-type TriggererJob --hostname "$${HOSTNAME}"']
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    restart: always
+    depends_on:
+      <<: *reposicion-depends
+      airflow-init:
+        condition: service_completed_successfully
+
+  # Para ejecutar órdenes de Airflow sin entrar a un contenedor que ya corre:
+  #     docker compose run --rm cli dags list
+  # El perfil evita que arranque con `docker compose up`.
+  cli:
+    <<: *reposicion-common
+    profiles: ["cli"]
+    entrypoint: /entrypoint
+    command: version
+    restart: "no"
+
+volumes:
+  postgres-reposicion:

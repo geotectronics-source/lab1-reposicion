@@ -90,7 +90,7 @@ def proyecto(tmp_path: Path, monkeypatch) -> Path:
     raiz = tmp_path / "proyecto"
     (raiz / "config").mkdir(parents=True)
 
-    for nombre in ("model", "costs"):
+    for nombre in ("model", "costs", "seguimiento"):
         original = yaml.safe_load((RAIZ_REAL / "config" / f"{nombre}.yaml").read_text("utf-8"))
         if nombre == "model":
             for seccion, valores in RECORTES.items():
@@ -118,17 +118,40 @@ def proyecto(tmp_path: Path, monkeypatch) -> Path:
         ),
         landing / "historico" / "oil.csv",
     )
+
+    # `transactions` existe porque el producto conoce la fuente, y un almacén
+    # al que le falta una fuente entera no es un proyecto realista: la
+    # auditoría lo detecta como "sin datos" y hace fallar la tarea, que es
+    # justo lo que tiene que hacer.
+    transacciones = pd.DataFrame(
+        [
+            {"date": fecha, "store_nbr": tienda, "transactions": 500 + tienda}
+            for fecha in pd.date_range(PRIMER_DIA, ULTIMA_VENTA, freq="D")
+            for tienda in TIENDAS
+        ]
+    )
+    _escribir(
+        transacciones[transacciones["date"] <= CORTE_HISTORICO],
+        landing / "historico" / "transactions.csv",
+    )
     _escribir(
         pd.DataFrame(
             [
                 {
-                    "date": "2017-05-24",
+                    "date": fecha,
                     "type": "Holiday",
                     "locale": "National",
                     "locale_name": "Ecuador",
-                    "description": "Batalla de Pichincha",
+                    "description": descripcion,
                     "transferred": False,
                 }
+                # El calendario se publica con anticipación, así que su último
+                # dato está en el futuro de la emisión. Es lo que hace que la
+                # auditoría no lo vea como una fuente atrasada.
+                for fecha, descripcion in (
+                    ("2017-05-24", "Batalla de Pichincha"),
+                    ("2017-08-10", "Primer Grito de Independencia"),
+                )
             ]
         ),
         landing / "historico" / "holidays_events.csv",
@@ -144,6 +167,19 @@ def proyecto(tmp_path: Path, monkeypatch) -> Path:
             / f"arrival_date={llegada:%Y-%m-%d}"
             / "sales"
             / f"sales_{fecha:%Y-%m-%d}.csv",
+        )
+
+    # `transactions` llega un día más tarde que las ventas. La asimetría es
+    # deliberada: obliga al producto a tolerar que en la fecha de emisión una
+    # fuente esté más atrasada que otra.
+    for fecha, bloque in transacciones[transacciones["date"] > CORTE_HISTORICO].groupby("date"):
+        llegada = fecha + pd.Timedelta(days=2)
+        _escribir(
+            bloque,
+            landing
+            / f"arrival_date={llegada:%Y-%m-%d}"
+            / "transactions"
+            / f"transactions_{fecha:%Y-%m-%d}.csv",
         )
 
     monkeypatch.setenv("REPOSICION_HOME", str(raiz))
@@ -297,7 +333,8 @@ def test_la_ingesta_no_duplica_al_repetirse(pipeline_corrido: Path):
 
 
 @pytest.mark.parametrize(
-    "orden", ["ingesta", "panel", "validar", "modelo", "pronosticar", "pedir"]
+    "orden",
+    ["ingesta", "auditar", "panel", "validar", "modelo", "pronosticar", "pedir", "seguir"],
 )
 def test_ninguna_orden_funciona_sin_asof(orden: str, proyecto: Path):
     """Sin fecha lógica no se ejecuta nada.
@@ -362,3 +399,87 @@ def test_una_serie_sin_historia_la_atiende_el_respaldo(pipeline_corrido: Path):
     assert not serie.empty, "la tienda nueva se quedó sin pronóstico"
     assert serie["modelo"].unique().tolist() == ["baseline_estacional"]
     assert (serie["q0.9"] >= 0).all()
+
+
+# ---------------------------------------------------------------------------
+# Requerimiento 3 — operación: auditoría, modelo vigente y seguimiento
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.slow
+def test_la_auditoria_registra_el_estado_de_cada_fuente(pipeline_corrido: Path):
+    """Con latencia D+1, las ventas van un día por detrás y eso es lo normal.
+
+    La auditoría tiene que decirlo sin alarmarse: es la tarea que distingue un
+    retraso esperado de un flujo parado, y equivocarse hacia el lado estricto
+    haría caer el DAG todos los días.
+    """
+    _ejecutar("auditar", "--asof", ASOF)
+
+    reporte = pd.read_csv(
+        pipeline_corrido / "data" / "seguimiento" / f"asof={ASOF}" / "calidad.csv"
+    )
+    ventas = reporte.set_index("fuente").loc["sales"]
+
+    assert ventas["estado"] == "al dia"
+    assert ventas["ultimo_dato"] == f"{ULTIMA_VENTA:%Y-%m-%d}"
+    assert ventas["retraso_dias"] == 1
+
+
+@pytest.mark.slow
+def test_la_emision_usa_el_modelo_vigente_aunque_no_sea_de_su_fecha(pipeline_corrido: Path):
+    """Se emite la semana siguiente sin reentrenar: opera el modelo anterior.
+
+    Es la situación normal en operación —se emite cada lunes y se reentrena
+    una vez al mes— y la que haría fallar a un producto que exigiera un modelo
+    de la fecha exacta de la emisión.
+    """
+    siguiente = "2017-07-24"
+    _ejecutar("pronosticar", "--asof", siguiente)
+
+    emision = json.loads(
+        (
+            pipeline_corrido / "data" / "pronosticos" / f"asof={siguiente}" / "emision.json"
+        ).read_text("utf-8")
+    )
+
+    assert not (pipeline_corrido / "models" / f"asof={siguiente}").exists()
+    assert emision["modelo_asof"] == ASOF, "no usó el último modelo registrado"
+
+
+@pytest.mark.slow
+def test_el_seguimiento_califica_la_emision_de_la_semana_pasada(pipeline_corrido: Path):
+    """El lazo completo: se publicó un pedido, llegaron las ventas, se mide.
+
+    Es el requerimiento 3 del laboratorio de punta a punta, y la única prueba
+    que recorre la cadena en el orden en que la recorre el negocio: emitir,
+    esperar, comparar.
+    """
+    realizadas = _ventas(pd.date_range(ASOF, periods=7, freq="D"))
+    for fecha, bloque in realizadas.groupby("date"):
+        llegada = fecha + pd.Timedelta(days=1)
+        _escribir(
+            bloque,
+            pipeline_corrido
+            / "landing"
+            / f"arrival_date={llegada:%Y-%m-%d}"
+            / "sales"
+            / f"sales_{fecha:%Y-%m-%d}.csv",
+        )
+
+    medido = "2017-07-24"
+    _ejecutar("ingesta", "--asof", medido)
+    _ejecutar("seguir", "--asof", medido)
+
+    salida = pipeline_corrido / "data" / "seguimiento" / f"asof={medido}"
+    resumen = json.loads((salida / "desempeno.json").read_text("utf-8"))
+    fila = next(f for f in resumen["emisiones"] if f["emision"] == ASOF)
+
+    series = len(TIENDAS) * len(FAMILIAS)
+    assert fila["lineas"] == series * 7, "el horizonte completo tenía que estar realizado"
+    assert fila["realizado"] == 1.0
+    assert fila["costo_realizado"] > 0
+    assert fila["costo_validado"] is not None, "el baremo sale del reporte del modelo que operó"
+
+    detalle = pd.read_csv(salida / "desempeno.csv")
+    assert set(detalle["family"]) == set(FAMILIAS), "el detalle se desagrega por familia"
