@@ -76,7 +76,7 @@ nada de lo que sigue.
 
 ```bash
 uv sync                      # crea el entorno a partir de uv.lock
-uv run pytest                # 311 pruebas, sin Airflow y sin Docker
+uv run pytest                # 312 pruebas, sin Airflow y sin Docker
 uv run ruff check .
 ```
 
@@ -757,7 +757,7 @@ src/reposicion/   el producto
   calidad.py        auditoría del almacén: huecos de entrega y correcciones
   seguimiento.py    desempeño realizado de los pedidos ya publicados
   cli.py            puntos de entrada del pipeline
-tests/            311 pruebas; corren sin Airflow y sin Docker
+tests/            312 pruebas; corren sin Airflow y sin Docker
 tools/            simulador del sistema de origen (NO es parte del producto)
 reportes/         métricas y decisiones de promoción (sí van a Git)
 ```
@@ -786,7 +786,7 @@ Las irrenunciables, que son las que justifican el resto:
 | Que un hueco de entrega no se confunda con una ingesta parada | `test_calidad.py` |
 | Que el seguimiento no rellene con cero lo que aún no ha llegado | `test_seguimiento.py` |
 | Que un backfill no use un modelo entrenado después de su fecha | `test_registro.py` |
-| Que las salidas de texto usen LF en cualquier sistema operativo | `test_invariantes.py` |
+| Que las salidas de texto usen LF en cualquier sistema operativo | `test_invariantes.py`, `test_build_landing.py` |
 
 ## Dónde está cada requerimiento del enunciado
 

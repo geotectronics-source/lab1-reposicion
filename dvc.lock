@@ -10,8 +10,8 @@ stages:
       nfiles: 5
     - path: tools/build_landing.py
       hash: md5
-      md5: b4b87bbea75fb14b453d1a6fd06924f2
-      size: 12614
+      md5: 94e3dcff4644ff5fb933847fa000b6d8
+      size: 13348
     params:
       config/sources.yaml:
         fuentes:
@@ -82,16 +82,16 @@ stages:
     outs:
     - path: landing
       hash: md5
-      md5: 637cfb90887b3d8b975900e0322bfe66.dir
-      size: 126625013
+      md5: 041a8eaeeee5922843e88023dd2e90e6.dir
+      size: 123536130
       nfiles: 145
   ingesta:
     cmd: python -m reposicion ingesta --asof 2017-07-17
     deps:
     - path: landing
       hash: md5
-      md5: 637cfb90887b3d8b975900e0322bfe66.dir
-      size: 126625013
+      md5: 041a8eaeeee5922843e88023dd2e90e6.dir
+      size: 123536130
       nfiles: 145
     - path: src/reposicion
       hash: md5

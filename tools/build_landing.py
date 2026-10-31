@@ -238,6 +238,20 @@ def aplicar_incidentes(plan: list[Entrega], incidentes: list[dict] | None) -> li
 # ---------------------------------------------------------------------------
 
 
+#: Fin de línea de la bandeja, fijo en cualquier sistema operativo.
+#:
+#: `to_csv` traduce `\n` al de la plataforma, de modo que sin esto la bandeja
+#: salía con CRLF en Windows y LF en Linux. El producto no se entera —el CSV se
+#: parsea igual— pero `landing/` es la salida de la etapa `bandeja` y DVC
+#: compara bytes: el mismo simulador producía un hash distinto por plataforma,
+#: y eso obsoletaba la cadena entera desde la etapa 0.
+#:
+#: Se declara aquí y no se importa de `reposicion.io` a propósito: el simulador
+#: representa un sistema ajeno y no depende del producto (INVARIANTE 2). Que
+#: las dos constantes coincidan es correcto, y que vivan separadas también.
+FIN_DE_LINEA = "\n"
+
+
 def escribir_csv(df: pd.DataFrame, destino: Path) -> None:
     """Escritura atómica: archivo temporal y renombrado.
 
@@ -246,7 +260,7 @@ def escribir_csv(df: pd.DataFrame, destino: Path) -> None:
     """
     destino.parent.mkdir(parents=True, exist_ok=True)
     tmp = destino.with_suffix(destino.suffix + ".tmp")
-    df.to_csv(tmp, index=False, date_format="%Y-%m-%d")
+    df.to_csv(tmp, index=False, date_format="%Y-%m-%d", lineterminator=FIN_DE_LINEA)
     tmp.replace(destino)
 
 
