@@ -122,7 +122,134 @@ fuera o no se ejecuta nada.
 
 ## Reproducir un pronóstico pasado
 
-<!-- EVIDENCIA_DVC -->
+El requerimiento central del versionamiento. La pregunta a contestar es: *«¿qué pedido publicamos
+el 14 de agosto, y se puede demostrar?»*
+
+Hay dos emisiones en el historial, que se distinguen por un solo valor:
+
+```console
+$ git log --oneline -S'asof: "2017-08-14"' -- config/pipeline.yaml
+87fb20f Emite el pronostico del 2017-07-17 cambiando solo la fecha logica
+25fc898 Versiona el pipeline con DVC y emite el pronostico del 2017-08-14
+```
+
+Buscar por el *contenido* del parámetro (`git log -S`) y no por la fecha del commit es a propósito:
+la fecha lógica es un dato versionado, así que el propio Git sabe cuándo cambió.
+
+### Paso 1 — volver al commit de esa emisión
+
+```console
+$ git checkout 25fc898
+$ grep '^asof' config/pipeline.yaml
+asof: "2017-08-14"
+```
+
+### Paso 2 — recuperar los datos que ese commit describe
+
+```console
+$ uv run dvc checkout
+A       data/pedidos/asof=2017-08-14/
+A       models/asof=2017-08-14/
+A       data/procesado/asof=2017-08-14/entrenamiento.parquet
+A       data/pronosticos/asof=2017-08-14/pronostico.parquet
+A       data/seguimiento/asof=2017-08-14/validacion.csv
+D       data/pedidos/asof=2017-07-17/
+D       models/asof=2017-07-17/
+D       data/procesado/asof=2017-07-17/entrenamiento.parquet
+D       data/pronosticos/asof=2017-07-17/pronostico.parquet
+D       data/seguimiento/asof=2017-07-17/validacion.csv
+```
+
+Repone la emisión de agosto **y retira la de julio**: el espacio de trabajo queda exactamente
+como lo describe el commit, no como una mezcla de los dos.
+
+### Paso 3 — comprobar que es el pronóstico de agosto y no otro
+
+```console
+OK  c9dd259328cb31412f8066efb20c7d36  data/pronosticos/asof=2017-08-14/pronostico.parquet
+OK  6882ffb1933913a57f576f72f31ec76a  data/pedidos/asof=2017-08-14/pedido.parquet
+OK  1fdefa433ae795f553e0631fb2e3834b  models/asof=2017-08-14/modelo.pkl
+```
+
+Y el almacén también retrocedió, que es lo que hace honesto al pronóstico:
+
+```console
+ventas vigentes: 2.997.324  hasta 2017-08-13
+```
+
+No llega al 14 porque no podía: con latencia D+1, el 14 de agosto sólo se conocían las ventas
+hasta el 13. El pronóstico reproducido usa la información que **había llegado** entonces, no la
+que existe hoy.
+
+### Paso 4 — regenerarlo, no sólo recuperarlo
+
+Los pasos anteriores restauran archivos desde la caché. Eso prueba trazabilidad, pero no prueba
+que el resultado sea *reproducible*: podría ser que el pipeline ya no fuera capaz de producirlo.
+Así que se recalcula desde cero:
+
+```console
+$ uv run dvc repro --force -s modelo pronostico pedido
+Running stage 'modelo':
+lgbm_cuantilico ajustado con 1,297,296 ejemplos
+-> models/asof=2017-08-14/modelo.pkl  (32.0 s)
+Running stage 'pronostico':
+12,474 filas  ·  origen 2017-08-13
+-> data/pronosticos/asof=2017-08-14/pronostico.parquet  (3.1 s)
+Running stage 'pedido':
+1,782 series  ·  5,554,337 unidades  ·  68 linea(s) recortada(s) por el tope
+```
+
+```
+IDENTICO   1fdefa433ae795f553e0631fb2e3834b  models/asof=2017-08-14/modelo.pkl
+IDENTICO   c9dd259328cb31412f8066efb20c7d36  data/pronosticos/asof=2017-08-14/pronostico.parquet
+IDENTICO   6882ffb1933913a57f576f72f31ec76a  data/pedidos/asof=2017-08-14/pedido.parquet
+```
+
+**Los tres artefactos vuelven a salir byte a byte iguales**, incluidos los 7,3 MB del modelo
+entrenado desde cero sobre 1 297 296 ejemplos. El determinismo no es casualidad: los tres
+modelos fijan semilla, y hay una prueba que entrena cada uno dos veces y compara el md5 del
+artefacto (`tests/test_registro.py`).
+
+### Lo que hace que esto funcione
+
+DVC compara **contenido**, no fechas de modificación. Durante el desarrollo se refactorizó
+`io.py` y bastó para que el lock quedara desfasado:
+
+```console
+$ uv run dvc status
+ingesta:
+        changed deps:
+                modified:           src/reposicion
+
+$ uv run dvc repro
+Stage 'bandeja' didn't change, skipping
+Running stage 'ingesta':
+-> data/raw  (2.1 s)
+Stage 'panel' didn't change, skipping
+Stage 'validacion' didn't change, skipping
+Stage 'modelo' didn't change, skipping
+Stage 'pronostico' didn't change, skipping
+Stage 'pedido' didn't change, skipping
+```
+
+Volvió a ejecutar la ingesta en 2 segundos, obtuvo un `data/raw` **idéntico** —porque el
+refactor no cambiaba el comportamiento— y al ver el mismo contenido se saltó las cinco etapas
+siguientes, incluidos los catorce minutos de panel y validación. Con comparación por fecha de
+modificación habría recalculado todo sin necesidad.
+
+### El remoto
+
+```console
+$ uv run dvc push
+280 files pushed
+```
+
+El remoto es una **carpeta local** (`../dvc-remote-lab1`, 200 MB), configurada así a propósito:
+el evaluador no necesita credenciales de ninguna nube para reproducir nada, y la mecánica que se
+demuestra (`push`, `pull`, `checkout`) es la misma. La contrapartida, explícita: no sirve para
+compartir entre máquinas; para eso habría que cambiar una línea de `.dvc/config`. Y como la
+etapa `bandeja` regenera la bandeja desde los CSV de Kaggle, quien clone el repositorio puede
+reconstruirlo todo con `dvc repro` aunque no tenga acceso a esta caché.
 
 ---
 

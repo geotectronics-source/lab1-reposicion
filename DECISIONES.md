@@ -450,18 +450,81 @@ puntero jamás habría llegado al repositorio. Quien clonara el repo no tendría
 qué datos usó el pipeline, y todo el versionamiento con DVC sería decorativo. Sin error, sin
 aviso.
 
-El arreglo es excluir el **contenido** en vez de la carpeta, que sí admite excepciones:
+El arreglo aparente es excluir el **contenido** en vez de la carpeta, que sí admite excepciones:
 
 ```gitignore
 /data/*
 !/data/*.dvc
-!/data/.gitignore
 ```
 
-En la fase 5 el mismo mecanismo —un patrón sin anclar— excluyó `src/reposicion/models/` entero
-y el CI lo detectó sólo al clonar en limpio. Las dos veces el fallo fue silencioso y las dos
-veces el síntoma apareció lejos de la causa. La conclusión práctica: **toda regla de
-`.gitignore` que pretenda incluir algo se verifica con `git check-ignore`, no leyéndola.** Hay
-dos pruebas en `tests/test_invariantes.py` que lo hacen en cada `pytest`: una comprueba que
-ningún `.py` esté ignorado y otra que ningún dato esté versionado.
+Y eso arregló Git, pero rompió DVC de otra forma, que tardó más en aparecer.
+
+#### El segundo fallo: DVC no entra en carpetas ignoradas por Git
+
+Con `/data/*`, el puntero sí llegaba al repositorio. Pero al volver a un commit anterior para
+reproducir una emisión pasada, `dvc checkout` **borró los 123 MB de CSV de Kaggle**:
+
+```
+$ uv run dvc checkout
+...
+D       data/kaggle/
+```
+
+Y los borraba cada vez, aunque `data/kaggle.dvc` estuviera ahí mismo y `dvc status
+data/kaggle.dvc` dijera que todo estaba al día. La traza detallada dio la causa:
+
+```
+$ uv run dvc checkout -vv
+DEBUG: Removing '.../data/kaggle' as unused link.
+...
+TRACE:  199.58 ms in collecting stages from .../lab1-reposicion
+TRACE:  249.00 mks in collecting stages from .../lab1-reposicion/.github
+TRACE:    5.20 mks in collecting stages from .../lab1-reposicion/config
+TRACE:    1.30 mks in collecting stages from .../lab1-reposicion/dags
+TRACE:  236.90 mks in collecting stages from .../lab1-reposicion/reportes
+TRACE:  276.40 mks in collecting stages from .../lab1-reposicion/src
+TRACE:   12.90 mks in collecting stages from .../lab1-reposicion/tests
+```
+
+El recorrido visita `.github`, `config`, `dags`, `reportes`, `src`, `tests` — **y nunca `data`**.
+DVC no desciende a directorios ignorados por Git cuando busca archivos `.dvc`. Así que no
+encontraba el puntero, no consideraba `data/kaggle` parte de la salida esperada, y lo retiraba
+"por enlace sin usar". Lógico desde dentro de DVC, y destructivo desde fuera.
+
+Primero probé la hipótesis equivocada —que el conflicto venía de declarar `data/kaggle` a la vez
+como salida de un `.dvc` y como dependencia de la etapa `bandeja`— y la descarté quitando la
+dependencia: seguía borrándolo. Fue la traza, no el razonamiento, la que dio la respuesta.
+
+#### El arreglo
+
+Enumerar las subcarpetas, de modo que `data/` quede visible para el recorrido de DVC:
+
+```gitignore
+/data/kaggle/
+/data/raw/
+/data/procesado/
+/data/pronosticos/
+/data/pedidos/
+/data/seguimiento/
+/data/cuarentena/
+```
+
+`landing/` y `models/` sí pueden ir en bloque: son salidas de etapas, su hash vive en
+`dvc.lock` y no hay ningún `.dvc` dentro que DVC deba encontrar.
+
+La contrapartida, declarada: una subcarpeta nueva bajo `data/` no quedaría cubierta. De eso
+avisa `test_no_hay_datos_ni_modelos_en_el_repositorio`, que falla si Git rastrea algo que no sea
+un puntero.
+
+#### Lo que hay que llevarse de aquí
+
+Tres veces en este proyecto —`models/` sin anclar en la fase 5, y las dos de arriba— un patrón
+de `.gitignore` rompió algo importante **sin lanzar ningún error**, y las tres veces el síntoma
+apareció lejos de la causa. La regla práctica: **ninguna regla de `.gitignore` se da por
+entendida leyéndola; se verifica con `git check-ignore`.** Y si un archivo tiene que ser visible
+para otra herramienta, hay que comprobar que esa herramienta lo ve, no sólo que Git lo deja
+pasar.
+
+Hay dos pruebas que lo vigilan en cada `pytest`: una comprueba que ningún `.py` esté ignorado y
+la otra que ningún dato esté versionado.
 
