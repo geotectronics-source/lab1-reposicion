@@ -95,8 +95,8 @@ stages:
       nfiles: 145
     - path: src/reposicion
       hash: md5
-      md5: 22a7d8b161927bbf3b4794bfb1ad1943.dir
-      size: 159165
+      md5: 5271d35bca25e505605b1af08394e659.dir
+      size: 160243
       nfiles: 21
     params:
       config/pipeline.yaml:
@@ -117,8 +117,8 @@ stages:
       nfiles: 47
     - path: src/reposicion
       hash: md5
-      md5: 22a7d8b161927bbf3b4794bfb1ad1943.dir
-      size: 159165
+      md5: 5271d35bca25e505605b1af08394e659.dir
+      size: 160243
       nfiles: 21
     params:
       config/model.yaml:
@@ -161,8 +161,8 @@ stages:
       size: 49236988
     - path: src/reposicion
       hash: md5
-      md5: 22a7d8b161927bbf3b4794bfb1ad1943.dir
-      size: 159165
+      md5: 5271d35bca25e505605b1af08394e659.dir
+      size: 160243
       nfiles: 21
     params:
       config/costs.yaml:
@@ -220,16 +220,16 @@ stages:
     outs:
     - path: data/seguimiento/asof=2017-07-17/validacion.csv
       hash: md5
-      md5: 7863adf4ad0a3f05b0706a5736becb0c
-      size: 1722
+      md5: 0f3309121c3593f0290e4198d4a27f36
+      size: 1712
     - path: reportes/asof=2017-07-17/metricas.json
       hash: md5
-      md5: 849de929d2cfcfa6c45595aed4280b7c
-      size: 1304
+      md5: 4b25be0791e37690f005fc0776660611
+      size: 1263
     - path: reportes/asof=2017-07-17/promocion.json
       hash: md5
-      md5: 4c32b1a1d89401daea90fa200243ce85
-      size: 607
+      md5: 41bfaca4c16c596beb39dde707974bdf
+      size: 584
   modelo:
     cmd: python -m reposicion modelo --asof 2017-07-17
     deps:
@@ -239,12 +239,12 @@ stages:
       size: 49236988
     - path: reportes/asof=2017-07-17/promocion.json
       hash: md5
-      md5: 4c32b1a1d89401daea90fa200243ce85
-      size: 607
+      md5: 41bfaca4c16c596beb39dde707974bdf
+      size: 584
     - path: src/reposicion
       hash: md5
-      md5: 22a7d8b161927bbf3b4794bfb1ad1943.dir
-      size: 159165
+      md5: 5271d35bca25e505605b1af08394e659.dir
+      size: 160243
       nfiles: 21
     params:
       config/pipeline.yaml:
@@ -252,8 +252,8 @@ stages:
     outs:
     - path: models/asof=2017-07-17
       hash: md5
-      md5: 04c686a0d57a31777c2fe11a0a8fe7f1.dir
-      size: 7295028
+      md5: 7e8351855e18ffbb6d113c4e2e4d9fea.dir
+      size: 7294995
       nfiles: 2
   pronostico:
     cmd: python -m reposicion pronosticar --asof 2017-07-17
@@ -265,13 +265,13 @@ stages:
       nfiles: 47
     - path: models/asof=2017-07-17
       hash: md5
-      md5: 04c686a0d57a31777c2fe11a0a8fe7f1.dir
-      size: 7295028
+      md5: 7e8351855e18ffbb6d113c4e2e4d9fea.dir
+      size: 7294995
       nfiles: 2
     - path: src/reposicion
       hash: md5
-      md5: 22a7d8b161927bbf3b4794bfb1ad1943.dir
-      size: 159165
+      md5: 5271d35bca25e505605b1af08394e659.dir
+      size: 160243
       nfiles: 21
     params:
       config/model.yaml:
@@ -303,8 +303,8 @@ stages:
     outs:
     - path: data/pronosticos/asof=2017-07-17
       hash: md5
-      md5: 47b604f42392ef96847e02de0cf0ef0c.dir
-      size: 1032957
+      md5: 63f657bdaeb67d916bfdf22328664b45.dir
+      size: 1032943
       nfiles: 2
   pedido:
     cmd: python -m reposicion pedir --asof 2017-07-17
@@ -315,8 +315,8 @@ stages:
       size: 1032698
     - path: src/reposicion
       hash: md5
-      md5: 22a7d8b161927bbf3b4794bfb1ad1943.dir
-      size: 159165
+      md5: 5271d35bca25e505605b1af08394e659.dir
+      size: 160243
       nfiles: 21
     params:
       config/costs.yaml:
@@ -359,6 +359,6 @@ stages:
     outs:
     - path: data/pedidos/asof=2017-07-17
       hash: md5
-      md5: 87be7408409085647ee661c57a074632.dir
-      size: 1227862
+      md5: cc636be2a324ef340ca87dea3aa417d4.dir
+      size: 1226045
       nfiles: 3

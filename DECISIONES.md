@@ -610,6 +610,45 @@ hashea exige `dvc repro` en el mismo commit.** Un reformateo, un cambio de final
 renombrado de variables no son «cambios inocuos» para una herramienta que compara bytes. Si el
 commit de normalización hubiera llevado el `dvc repro` dentro, no habría habido nada que
 reparar.
+### 2.10 El producto fija el fin de línea de sus salidas de texto
+
+La otra cara de §2.9. Allí el problema era que DVC hashea los archivos de **código** como
+dependencia; aquí es que hashea los de **salida**, y el producto los escribía distinto en cada
+sistema operativo.
+
+Ni `Path.write_text` ni `DataFrame.to_csv` fijan el fin de línea: los dos abren el archivo en
+modo texto y traducen `\n` al de la plataforma. Medido sobre las salidas reales en Windows:
+
+| salida | retornos de carro |
+|---|---|
+| `reportes/asof=…/metricas.json` | 41 de 41 líneas |
+| `data/pedidos/asof=…/pedido_semana.csv` | 1.783 de 1.783 |
+| `data/seguimiento/asof=…/validacion.csv` | una por fila |
+
+Dos consecuencias, ninguna cosmética:
+
+1. **El mismo pipeline producía hashes distintos en Windows y en Linux** para archivos cuyo
+   contenido es idéntico. `dvc repro` en otro sistema operativo daba las etapas por obsoletas sin
+   que hubiera cambiado un dato. Es el mismo síntoma que §3.15 —donde la causa es el último bit
+   de un flotante y no hay nada que hacer— pero aquí la causa es evitable, y dejarla habría
+   mezclado un problema real con uno autoinfligido.
+2. **Los JSON de `reportes/` son salidas `cache: false` rastreadas en Git.** Cada `dvc repro` en
+   Windows los dejaba marcados como modificados aunque `git diff` saliera vacío, porque
+   `.gitattributes` normaliza al comparar. El árbol de trabajo quedaba permanentemente sucio, y
+   un árbol que siempre está sucio es un árbol en el que nadie mira si está sucio.
+
+La corrección es `newline="\n"` y `lineterminator="\n"` explícitos, en una constante con nombre
+—`io.FIN_DE_LINEA`— para que el siguiente escritor que se añada no tenga que acordarse.
+
+#### Por qué la prueba mira a los escritores y no al repositorio
+
+La tentación es comprobar que los archivos de `reportes/` no llevan CR. Daría **siempre verde** y
+no probaría nada: `.gitattributes` normaliza lo que entra al índice, así que lo que se lee del
+repositorio es LF por construcción, viniera como viniera del disco. La prueba llama a
+`escribir_json` y `escribir_csv` y mira los bytes que dejan.
+
+Se comprobó que falla con el código anterior antes de darla por buena. Una prueba de regresión
+que nunca se vio fallar no es una prueba de regresión, es una expresión de deseo.
 ---
 
 ## 3. Orquestación con Airflow 3
