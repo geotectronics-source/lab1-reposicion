@@ -680,6 +680,26 @@ Dicho de otro modo: el defecto del simulador era real pero **no podía alterar n
 sólo el hash de dos etapas. Se corrigió igual, porque dejarlo habría convertido §2.10 en un
 principio que el propio proyecto viola una etapa más arriba.
 
+#### Comprobado entre plataformas, no sólo arreglado
+
+Las pruebas verifican que no hay retornos de carro, lo cual en Linux es verdad por defecto y no
+prueba nada: son un guardia para Windows. La pregunta que de verdad importaba —*¿el mismo
+escritor produce ahora los mismos bytes en los dos sistemas?*— se contestó ejecutando los tres
+escritores sobre el mismo DataFrame en Windows y dentro del contenedor Linux, que lleva las
+dependencias fijadas desde `uv.lock`:
+
+| escritor | md5 en Windows | md5 en Linux |
+|---|---|---|
+| `io.escribir_csv` | `9bae9670fc30fa56210d7afbd6dc72cb` | `9bae9670fc30fa56210d7afbd6dc72cb` |
+| `io.escribir_json` | `2cbad5b1abaf92e2f3be7c9321c16794` | `2cbad5b1abaf92e2f3be7c9321c16794` |
+| `build_landing.escribir_csv` | `9bae9670fc30fa56210d7afbd6dc72cb` | `9bae9670fc30fa56210d7afbd6dc72cb` |
+
+Idénticos. Conviene notar el contraste con §3.15: allí la diferencia entre plataformas **no se
+puede eliminar**, porque nace del orden en que se suman los flotantes dentro de LightGBM. Aquí sí
+se podía, y por eso había que hacerlo: con las dos mezcladas, la primera habría quedado tapada
+por la segunda, y la afirmación «esto no se puede arreglar» habría sido verdad por el motivo
+equivocado.
+
 #### Por qué la prueba mira a los escritores y no al repositorio
 
 La tentación es comprobar que los archivos de `reportes/` no llevan CR. Daría **siempre verde** y
