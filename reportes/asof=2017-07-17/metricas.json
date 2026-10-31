@@ -1,0 +1,41 @@
+{
+  "campeon": "lgbm_cuantilico",
+  "ejemplos": 1297296,
+  "modelos": {
+    "baseline_estacional": {
+      "cobertura_0.5": 0.5636390358612581,
+      "cobertura_0.8": 0.7771164021164022,
+      "cobertura_0.9": 0.850382128159906,
+      "cobertura_0.95": 0.903298861632195,
+      "costo_negocio": 139.4936139445263,
+      "mae": 72.95873517926053,
+      "n": 49896.0,
+      "pinball_medio": 27.554621165450698,
+      "rmsle": 0.6337206541261522
+    },
+    "lgbm_cuantilico": {
+      "cobertura_0.5": 0.5409919298808187,
+      "cobertura_0.8": 0.8059096253540697,
+      "cobertura_0.9": 0.9034525145636256,
+      "cobertura_0.95": 0.947597669819892,
+      "costo_negocio": 113.11679725094443,
+      "mae": 61.65250811935598,
+      "n": 49896.0,
+      "pinball_medio": 21.308537107569958,
+      "rmsle": 0.4125884453163838
+    },
+    "lineal_cuantilico": {
+      "cobertura_0.5": 0.5515138154027043,
+      "cobertura_0.8": 0.8202260702260702,
+      "cobertura_0.9": 0.9192052803163914,
+      "cobertura_0.95": 0.9660627438405216,
+      "costo_negocio": 166.8887975310622,
+      "mae": 78.66927334747659,
+      "n": 49896.0,
+      "pinball_medio": 31.335726009352225,
+      "rmsle": 0.45566698695309166
+    }
+  },
+  "pliegues": 3,
+  "vigente": "baseline_estacional"
+}

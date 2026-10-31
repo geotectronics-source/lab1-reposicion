@@ -128,7 +128,63 @@ fuera o no se ejecuta nada.
 
 ## Cambiar un costo sin tocar código
 
-<!-- EVIDENCIA_COSTOS -->
+El requerimiento 2 del producto. Se cambia **un número** en `config/costs.yaml` y nada más:
+
+```diff
+ defaults:
+-  costo_quiebre: 3.0
++  costo_quiebre: 9.0
+   costo_merma: 1.0
+```
+
+DVC dice entonces qué quedó obsoleto:
+
+```console
+$ uv run dvc status
+validacion:
+        changed deps:
+                config/costs.yaml:
+                        modified:           defaults
+pedido:
+        changed deps:
+                config/costs.yaml:
+                        modified:           defaults
+```
+
+**Dos etapas, no una,** y conviene entender por qué: un costo tiene dos efectos de horizonte
+distinto. Cambia el pedido *hoy* (`pedido`) y puede cambiar *qué modelo opera* en el siguiente
+ciclo, porque la métrica que decide la promoción **es** el costo de negocio (`validacion`). El
+grafo los separa en vez de confundirlos. Para obtener sólo el pedido nuevo:
+
+```console
+$ uv run dvc repro -s pedido
+Running stage 'pedido':
+1,782 series  ·  5,993,661 unidades  ·  187 linea(s) recortada(s) por el tope
+-> data/pedidos/asof=2017-08-14/explicacion.csv  (0.1 s)
+```
+
+**0,1 segundos. Cero líneas de Python. Cero reentrenamientos.**
+
+| Familia | q\* antes | Cuantil usado | q\* después | Cuantil usado | Pedido |
+|---|---|---|---|---|---|
+| PRODUCE | 0,429 | 0,5 | 0,692 | 0,8 | +5,8 % |
+| GROCERY I | 0,857 | 0,9 | 0,947 | 0,95 | +6,0 % |
+| CLEANING | 0,857 | 0,9 | 0,947 | 0,95 | +19,2 % |
+| **EGGS** | 0,727 | 0,8 | **0,727** | **0,8** | **sin cambio** |
+
+```
+total antes:   5.554.337 unidades
+total después: 5.993.661 unidades      (+7,9 %)
+líneas topadas:       68  ->  187
+```
+
+El detalle de `EGGS` es el que confirma que la mecánica es la correcta: no se mueve porque tiene
+su propio `costo_quiebre: 4.0` en la configuración, y los ajustes por familia tienen precedencia
+sobre el valor por defecto.
+
+Al restaurar el costo, DVC devuelve el pedido anterior **sin recalcularlo**, desde su caché de
+ejecuciones, y el archivo es idéntico byte a byte (`md5 6882ffb1…`). Esa es la misma propiedad
+que sostiene la reproducción de un pronóstico pasado.
 
 ---
 
@@ -139,7 +195,26 @@ panel y las mismas series. La métrica que decide la promoción es el **costo de
 error estadístico, y el criterio exige ganar en **todos** los pliegues: un modelo que mejora
 mucho en uno y empeora en otro es inestable, y el promedio lo esconde.
 
-<!-- EVIDENCIA_MODELOS -->
+1 297 296 ejemplos de 105 orígenes semanales, 3 pliegues de 28 días:
+
+| Modelo | Costo negocio | Pinball | MAE | RMSLE | Cob. 0,9 | Cob. 0,95 |
+|---|---|---|---|---|---|---|
+| **lgbm cuantílico** | **105,95** | **20,21** | **58,74** | **0,401** | 0,903 | 0,951 |
+| baseline estacional | 130,52 | 25,22 | 69,12 | 0,507 | 0,858 | 0,909 |
+| lineal cuantílico | 263,06 | 40,09 | 86,16 | 0,434 | 0,953 | 0,978 |
+
+```
+lgbm   vs baseline: PROMOVER  (p1: +14,7 %, p2: +17,5 %, p3: +23,8 %)
+lineal vs baseline: MANTENER  (p1: -169,6 %, p2: -94,5 %, p3: -43,0 %)
+```
+
+El resultado que justifica toda la arquitectura de decisión: **el modelo lineal gana al baseline
+en RMSLE (0,434 frente a 0,507) y pierde en costo (263 frente a 131).** Las dos métricas señalan
+modelos distintos, en direcciones opuestas. Elegir por el error estadístico habría promovido el
+lineal y duplicado el costo de operación.
+
+La causa está en la cobertura: el lineal sobrecubre (0,978 donde debería dar 0,95). En error
+logarítmico pasarse apenas cuenta; en inventario real se traduce en merma.
 
 **Deep learning fue evaluado y descartado** con cuatro evidencias medidas sobre estos datos
 (saturación de capacidad, distribución del error, autocorrelación residual y el resultado del

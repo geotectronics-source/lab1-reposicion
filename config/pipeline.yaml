@@ -25,4 +25,4 @@
 
 # Emisión vigente. En operación, Airflow pasa su `logical_date` y este valor
 # no se usa; es el orquestador de reproducibilidad el que lo necesita.
-asof: "2017-08-14"
+asof: "2017-07-17"
