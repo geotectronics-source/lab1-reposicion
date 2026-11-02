@@ -449,6 +449,60 @@ Para confirmar que quedaron activos, la columna `is_paused` debe decir `False` e
 docker compose exec airflow-scheduler airflow dags list
 ```
 
+### Operar sobre tu propio periodo
+
+Lo anterior deja Airflow desplegado; esto es lo que lo pone a producir. Y **las fechas no son las
+de este README**: el corte del histórico se deriva de los datos (`última venta` menos
+`dias_operacion`, en [`config/sources.yaml`](config/sources.yaml)), así que si trajiste tus
+propios CSV de Kaggle la ventana se movió contigo.
+
+La imprime la etapa `bandeja` al correr `dvc repro`:
+
+```
+carga histórica : landing/historico (5 fuentes, hasta 2017-07-16)
+bandeja         : 113 archivos en 48 fechas de llegada
+rango de llegada: 2017-07-17 -> 2017-09-02
+```
+
+Si ya no la tienes en pantalla, está en los nombres de las carpetas de la bandeja:
+
+```bash
+ls landing | grep arrival_date= | sort | sed -n '1p;$p'
+```
+
+**`--to-date` es un instante, no un día de calendario.** El backfill sólo crea los runs cuyo
+disparo del cron cae *dentro* del intervalo, de modo que para incluir tu último día hay que pedir
+**el siguiente**. Con la ventana del ejemplo de arriba, el rango es `2017-07-17` a `2017-09-03`.
+Un rango que se queda corto no da error: el aviso es un `Warning` y la orden sale con código 0.
+
+Son cuatro backfills, **uno detrás de otro**, porque cada uno consume lo que dejó el anterior:
+
+| # | DAG | Espera a que haya terminado |
+|---|---|---|
+| 1 | `ingesta_fuentes` | nada; es el que llena el almacén |
+| 2 | `reentrenamiento` | la ingesta, para tener panel con el que validar |
+| 3 | `forecast_pedido` | el reentrenamiento, que deja el modelo registrado |
+| 4 | `seguimiento_desempeno` | el pronóstico, que publica los pedidos que hay que calificar |
+
+```bash
+docker compose exec airflow-scheduler \
+  airflow backfill create --dag-id ingesta_fuentes --from-date 2017-07-17 --to-date 2017-09-03
+```
+
+Antes de lanzar el siguiente, comprueba que no queda ninguno en marcha:
+
+```bash
+docker compose exec airflow-scheduler airflow dags list-runs ingesta_fuentes
+```
+
+Repite las dos órdenes con `reentrenamiento`, `forecast_pedido` y `seguimiento_desempeno`, en ese
+orden y con el mismo rango de fechas.
+
+**Qué es normal ver.** Los últimos runs de la ingesta pueden fallar en `auditar`: cuando los datos
+se acaban, las ventas quedan más atrasadas de lo que tolera `config/seguimiento.yaml` y la tarea
+se detiene. No es un defecto, es la auditoría encontrando el final de la bandeja; está contado en
+[La auditoría encontró sola el final de los datos](#la-auditoría-encontró-sola-el-final-de-los-datos).
+
 ### Los cuatro DAGs
 
 Uno por cadencia real. Ninguno existe para rellenar un hueco del enunciado.
@@ -576,7 +630,7 @@ sin error, y eso es compatible con que haya escrito cualquier cosa. Lo que sigue
 que salieron de los archivos, leídos después.
 
 ```bash
-airflow backfill create --dag-id ingesta_fuentes --from-date 2017-07-18 --to-date 2017-08-20
+airflow backfill create --dag-id ingesta_fuentes --from-date 2017-07-18 --to-date 2017-08-21
 ```
 
 #### Un hueco de entrega declarado, resuelto sin intervención
